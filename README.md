@@ -49,10 +49,3 @@ Current development is focused on expanding collaborative workspaces, real-time 
 The long-term goal of Innovators is to create a platform where people can identify problems, develop ideas, find collaborators with complementary skills, and build real world solutions together.
 
 ---
-
-# Development Setup
-
-## 1. Install dependencies
-
-```bash
-npm install
