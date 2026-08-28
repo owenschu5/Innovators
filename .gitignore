@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Private environment configuration (keep the safe template tracked)
+.env
+.env.*
+!.env.example
+
+# Framework, build, and test output
+.next/
+out/
+dist/
+build/
+coverage/
+.turbo/
+*.tsbuildinfo
+
+# Logs and local runtime output
+logs/
+*.log
+.codex-logs/
+
+# Deployment tooling
+.vercel/
+
+# OS and editor temporary files
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+*.swo
+*~

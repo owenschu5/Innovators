@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --page-ink: #172033;
+  --page-bg: #f6f1e8;
+  --page-accent: #0f766e;
+  --page-warm: #f59e0b;
+}
+
+html, body, #__next {
+  height: 100%;
+}
+
+body {
+  background: var(--page-bg);
+  color: var(--page-ink);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+h1, h2, h3, h4 {
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+}
+
+::selection {
+  background: rgba(15, 118, 110, 0.18);
+  color: var(--page-ink);
+}
