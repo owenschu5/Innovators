@@ -1,47 +1,58 @@
-# Innovators Platform — Stage 1 (Scaffold)
+# Innovators
 
-Quick scaffold for the Stage 1 MVP: Next.js + Supabase + Tailwind.
+A collaborative platform designed to help people turn ideas into real projects.
 
-Setup
+Innovators gives users a place to share ideas, discuss problems, find collaborators, form project teams, and work together inside dedicated project workspaces.
 
-1. Install dependencies:
+## Why I Built It
+
+Social platforms are great at generating discussion, but they aren't designed to turn discussion into action.
+
+Innovators explores a different model:
+
+**idea → discussion → collaboration → project development**
+
+The goal is to create an environment where people with different skills can come together around problems and build solutions.
+
+## Features
+
+- Idea and discussion feed
+- Project creation and team formation
+- Collaborative project workspaces
+- Member roles and project invitations
+- File creation and organization
+- Collaborative development environment
+- Autosaving and file version history
+- Real-time collaboration architecture
+- Project-specific discussions
+- AI-assisted project development
+- Admin workflow for reviewing project progression
+
+## Tech Stack
+
+- Next.js
+- TypeScript / JavaScript
+- Supabase
+- PostgreSQL
+- Tailwind CSS
+- OpenAI API
+- Real-time collaboration architecture
+
+## Project Status
+
+🚧 **Actively under development**
+
+Current development is focused on expanding collaborative workspaces, real-time editing, and AI-assisted development.
+
+## Vision
+
+The long-term goal of Innovators is to create a platform where people can identify problems, develop ideas, find collaborators with complementary skills, and build real world solutions together.
+
+---
+
+# Development Setup
+
+## 1. Install dependencies
 
 ```bash
 npm install
-```
-
-2. Create a Supabase project and add the `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` to `.env.local`:
-
-```env
-NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
-NEXT_PUBLIC_COLLAB_URL=ws://localhost:1234
-OPENAI_API_KEY=your_server_side_openai_key
-OPENAI_MODEL=gpt-4.1-mini
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=your_strong_admin_password
-ADMIN_SESSION_SECRET=your_long_random_session_secret
-```
-
-3. Apply DB schema (using psql or Supabase SQL editor):
-
-```bash
-psql < sql/schema.sql
-```
-
-The admin portal lives at `/admin/login`. It reviews project move requests only for now; the later workspace and code-space creation flow can be layered on top of the approved requests.
-
-Project Workspace features also require the migration files under `sql/migrations/`, including:
-
-- `20260810_project_groups_workflow.sql`
-- `20260810_workspace_files.sql`
-- `20260811_workspace_ai_agent.sql`
-- `20260811_workspace_phase1_foundation.sql`
-
-The Build with AI panel uses the server-side `OPENAI_API_KEY`; never expose that key with a `NEXT_PUBLIC_` prefix.
-
-4. Run dev server:
-
-```bash
-npm run dev
-```
