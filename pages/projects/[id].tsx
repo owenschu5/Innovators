@@ -18,8 +18,9 @@ type Node = {
   version: number
 }
 
-type WorkspaceTab = 'overview' | 'work' | 'rooms' | 'build'
-type WorkFilter = 'all' | 'objectives' | 'tasks' | 'research' | 'design' | 'more'
+type WorkspaceTab = 'overview' | 'work' | 'discuss' | 'build'
+type WorkFilter = 'objectives' | 'tasks'
+type NewWorkItem = 'objective' | 'task'
 type Objective = {
   id: string
   title: string
@@ -113,8 +114,8 @@ type MonacoEditorInstance = Parameters<OnMount>[0]
 type MonacoNamespace = Parameters<OnMount>[1]
 
 const collabUrl = process.env.NEXT_PUBLIC_COLLAB_URL || 'ws://localhost:1234'
-const workspaceTabs: WorkspaceTab[] = ['overview', 'work', 'rooms', 'build']
-const workFilters: WorkFilter[] = ['all', 'objectives', 'tasks', 'research', 'design', 'more']
+const workspaceTabs: WorkspaceTab[] = ['overview', 'work', 'discuss', 'build']
+const workFilters: WorkFilter[] = ['objectives', 'tasks']
 const stages = ['define', 'validate', 'design', 'build', 'test', 'launch', 'improve']
 const contributionRoles = ['any', 'thinker', 'researcher', 'designer', 'coder', 'builder', 'entrepreneur']
 
@@ -192,12 +193,13 @@ export default function ProjectWorkspace() {
   const [connectionStatus, setConnectionStatus] = useState('Offline')
   const [collaborators, setCollaborators] = useState<string[]>([])
   const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<WorkspaceTab>('overview')
-  const [activeWorkFilter, setActiveWorkFilter] = useState<WorkFilter>('all')
+  const [activeWorkFilter, setActiveWorkFilter] = useState<WorkFilter>('objectives')
+  const [newWorkItem, setNewWorkItem] = useState<NewWorkItem | null>(null)
   const [overview, setOverview] = useState<WorkspaceOverview | null>(null)
   const [workspaceError, setWorkspaceError] = useState('')
   const [workspaceBusy, setWorkspaceBusy] = useState(false)
   const [objectiveForm, setObjectiveForm] = useState({ title: '', description: '', priority: 'medium', stage: 'define' })
-  const [taskForm, setTaskForm] = useState({ title: '', description: '', objective_id: '', suggested_role: 'any', priority: 'medium' })
+  const [taskForm, setTaskForm] = useState({ title: '', description: '', objective_id: '', suggested_role: 'any', assigned_to: '', priority: 'medium' })
   const [rooms, setRooms] = useState<ProjectRoom[]>([])
   const [messages, setMessages] = useState<WorkspaceMessage[]>([])
   const [activeRoomId, setActiveRoomId] = useState<string | null>(null)
@@ -408,9 +410,9 @@ export default function ProjectWorkspace() {
         setMessages(payload.messages || [])
         const nextRoomId = payload.active_room_id || roomId || activeRoomId || null
         setActiveRoomId(nextRoomId)
-        if (nextRoomId && activeWorkspaceTab === 'rooms') void markRoomRead(nextRoomId)
+        if (nextRoomId && activeWorkspaceTab === 'discuss') void markRoomRead(nextRoomId)
       } catch (err) {
-        setRoomsError(err instanceof Error ? err.message : 'Unable to load project rooms')
+        setRoomsError(err instanceof Error ? err.message : 'Unable to load project discussions')
       }
     },
     [activeRoomId, activeWorkspaceTab, id, markRoomRead, roomsRequest]
@@ -418,7 +420,7 @@ export default function ProjectWorkspace() {
 
   useEffect(() => {
     if (id) void loadRooms()
-  }, [id])
+  }, [id, loadRooms])
 
   useEffect(() => {
     if (!roomWorkspaceId) return
@@ -429,7 +431,7 @@ export default function ProjectWorkspace() {
         { event: 'INSERT', schema: 'public', table: 'workspace_messages', filter: `workspace_id=eq.${roomWorkspaceId}` },
         (payload) => {
           const next = payload.new as WorkspaceMessage
-          if (next.room_id === activeRoomId && activeWorkspaceTab === 'rooms') {
+          if (next.room_id === activeRoomId && activeWorkspaceTab === 'discuss') {
             void loadRooms(activeRoomId)
             void markRoomRead(activeRoomId)
           } else {
@@ -460,7 +462,7 @@ export default function ProjectWorkspace() {
   }, [activeRoomId, activeWorkspaceTab, loadRooms, markRoomRead, roomWorkspaceId])
 
   useEffect(() => {
-    if (activeWorkspaceTab === 'rooms' && activeRoomId) void markRoomRead(activeRoomId)
+    if (activeWorkspaceTab === 'discuss' && activeRoomId) void markRoomRead(activeRoomId)
   }, [activeRoomId, activeWorkspaceTab, markRoomRead])
 
   const loadAi = useCallback(async () => {
@@ -567,7 +569,7 @@ export default function ProjectWorkspace() {
       setAiBusy(true)
       setAiError('')
       try {
-        const payload = await aiRequest('POST', { mode, prompt, active_file_id: openId })
+        const payload = await aiRequest('POST', { mode: mode === 'change' ? 'edit' : mode, prompt, active_file_id: openId })
         setAiRuns((current) => [payload.run, ...current.filter((run) => run.id !== payload.run.id)])
         if (payload.changeSet) {
           setAiChangeSets((current) => [payload.changeSet, ...current.filter((changeSet) => changeSet.id !== payload.changeSet.id)])
@@ -576,8 +578,10 @@ export default function ProjectWorkspace() {
             ...current.filter((change) => change.change_set_id !== payload.changeSet.id),
           ])
         }
+        return true
       } catch (err) {
         setAiError(err instanceof Error ? err.message : 'AI request failed')
+        return false
       } finally {
         setAiBusy(false)
       }
@@ -656,15 +660,17 @@ export default function ProjectWorkspace() {
   const createObjective = useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault()
-      if (!objectiveForm.title.trim()) return
+      if (!objectiveForm.title.trim()) return false
       setWorkspaceBusy(true)
       setWorkspaceError('')
       try {
         await workspaceRequest('POST', { type: 'objective', ...objectiveForm })
         setObjectiveForm({ title: '', description: '', priority: 'medium', stage: overview?.workspace.current_stage || 'define' })
         await loadOverview()
+        return true
       } catch (err) {
         setWorkspaceError(err instanceof Error ? err.message : 'Unable to create objective')
+        return false
       } finally {
         setWorkspaceBusy(false)
       }
@@ -675,15 +681,17 @@ export default function ProjectWorkspace() {
   const createTask = useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault()
-      if (!taskForm.title.trim()) return
+      if (!taskForm.title.trim()) return false
       setWorkspaceBusy(true)
       setWorkspaceError('')
       try {
         await workspaceRequest('POST', { type: 'task', ...taskForm, objective_id: taskForm.objective_id || null, stage: overview?.workspace.current_stage || 'define' })
-        setTaskForm({ title: '', description: '', objective_id: '', suggested_role: 'any', priority: 'medium' })
+        setTaskForm({ title: '', description: '', objective_id: '', suggested_role: 'any', assigned_to: '', priority: 'medium' })
         await loadOverview()
+        return true
       } catch (err) {
         setWorkspaceError(err instanceof Error ? err.message : 'Unable to create task')
+        return false
       } finally {
         setWorkspaceBusy(false)
       }
@@ -1063,6 +1071,14 @@ export default function ProjectWorkspace() {
         <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">
           {overview?.idea?.description || overview?.project.summary || "Let's start turning this idea into a project."}
         </p>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <span className={activePill}>{currentStage}</span>
+          <span className={mutedPill}>{progress}% complete</span>
+          <span className={mutedPill}>{overview?.objectives.length || 0} active objectives</span>
+          <span className={mutedPill}>{openTasks.length} open tasks</span>
+          <span className={mutedPill}>{teamMembers.length} team members</span>
+        </div>
+        {currentStage === 'validate' ? <p className="mt-3 text-xs text-teal-200/80">Validate: define the problem, gather evidence, test assumptions, and get feedback.</p> : null}
 
         {!hasActiveWork ? (
           <div className="mt-6 rounded-2xl border border-teal-400/25 bg-teal-400/10 p-5">
@@ -1075,13 +1091,13 @@ export default function ProjectWorkspace() {
                 type="button"
                 onClick={() => {
                   setActiveWorkspaceTab('work')
-                  setActiveWorkFilter('objectives')
+                  setNewWorkItem('objective')
                 }}
                 className={primaryAction}
               >
                 Create First Objective
               </button>
-              <button type="button" onClick={() => setActiveWorkspaceTab('rooms')} className={secondaryAction}>
+              <button type="button" onClick={() => setActiveWorkspaceTab('discuss')} className={secondaryAction}>
                 Start Discussion
               </button>
             </div>
@@ -1097,7 +1113,7 @@ export default function ProjectWorkspace() {
               type="button"
               onClick={() => {
                 setActiveWorkspaceTab('work')
-                setActiveWorkFilter('all')
+                setActiveWorkFilter('objectives')
               }}
               className="text-sm font-semibold text-teal-300 hover:text-teal-200"
             >
@@ -1202,8 +1218,8 @@ export default function ProjectWorkspace() {
         <div className={`${workspaceSurface} p-5`}>
           <div className="flex items-center justify-between gap-3">
             <p className="text-sm font-semibold text-white">Recent</p>
-            <button type="button" onClick={() => setActiveWorkspaceTab('rooms')} className="text-sm font-semibold text-teal-300 hover:text-teal-200">
-              {totalUnread ? `${totalUnread} unread discussion${totalUnread === 1 ? '' : 's'}` : 'Open Rooms'}
+            <button type="button" onClick={() => setActiveWorkspaceTab('discuss')} className="text-sm font-semibold text-teal-300 hover:text-teal-200">
+              {totalUnread ? `${totalUnread} unread discussion${totalUnread === 1 ? '' : 's'}` : 'Open Discuss'}
             </button>
           </div>
           <div className="mt-4 space-y-3">
@@ -1222,29 +1238,29 @@ export default function ProjectWorkspace() {
   )
 
   const renderWork = () => {
-    const showObjectives = activeWorkFilter === 'all' || activeWorkFilter === 'objectives'
-    const showTasks = activeWorkFilter === 'all' || activeWorkFilter === 'tasks'
-    const showActivity = activeWorkFilter === 'more'
+    const showObjectives = activeWorkFilter === 'objectives'
+    const taskType = (task: ProjectTask) => {
+      const role = (task.suggested_role || 'any').toLowerCase()
+      return ({ researcher: 'Research', designer: 'Design', coder: 'Engineering', builder: 'Testing', thinker: 'Documentation', entrepreneur: 'Outreach', any: 'General' } as Record<string, string>)[role] || 'General'
+    }
+    const taskAssignee = (task: ProjectTask) => {
+      const member = teamMembers.find((item) => item.user_id === task.assigned_to)
+      return member?.member_name || member?.user?.email || member?.member_email || 'Unassigned'
+    }
 
     return (
-      <section className="min-h-[calc(100vh-129px)] overflow-auto p-6">
+      <section className="min-h-[calc(100vh-112px)] overflow-auto p-5">
         {workspaceError ? <div className="mb-4 rounded-xl border border-rose-900/80 bg-rose-950/60 p-3 text-sm text-rose-200">{workspaceError}</div> : null}
 
-        <div className={`${workspaceSurface} mb-5 p-5`}>
+        <div className="mb-5 flex flex-wrap items-end justify-between gap-4">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-teal-300">Work</p>
-              <h1 className="mt-1 text-2xl font-semibold text-white">Everything the team needs to accomplish</h1>
-              <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
-                Objectives organize the project. Research, design, tasks, testing, and launch work live here instead of competing for top-level space.
-              </p>
+              <h1 className="mt-1 text-2xl font-semibold text-white">Project execution</h1>
+              <p className="mt-1 text-sm text-slate-400">Objectives set direction. Tasks move the project forward.</p>
             </div>
-            <button type="button" onClick={() => setActiveWorkFilter('objectives')} className={primaryAction}>
-              New Objective
-            </button>
           </div>
-
-          <div className="mt-5 flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {workFilters.map((filter) => (
               <button
                 key={filter}
@@ -1259,119 +1275,24 @@ export default function ProjectWorkspace() {
                 {filter}
               </button>
             ))}
+            <button type="button" onClick={() => setNewWorkItem('objective')} className={`${primaryAction} ml-1`}>
+              + New
+            </button>
           </div>
         </div>
 
-        {activeWorkFilter === 'research' || activeWorkFilter === 'design' ? (
-          <WorkPlaceholder
-            label={activeWorkFilter === 'research' ? 'Research' : 'Design'}
-            description={
-              activeWorkFilter === 'research'
-                ? 'Research findings, sources, experiments, and unanswered questions will collect here as they connect to objectives.'
-                : 'Design flows, interface decisions, mockups, and experience notes will collect here as they connect to objectives.'
-            }
-          />
-        ) : null}
-
-        {showActivity ? (
-          <div className="grid gap-5 xl:grid-cols-3">
-            <WorkPlaceholder label="Testing" description="Acceptance tests and validation work live under Work and objective detail instead of a top-level Test tab." />
-            <WorkPlaceholder label="Launch" description="Launch planning, pilots, partner work, and business tasks live under Work when the project reaches that stage." />
-            <div className={`${workspaceSurface} p-5`}>
-              <p className="text-sm font-semibold text-white">Activity</p>
-              <div className="mt-4 space-y-3">
-                {meaningfulActivity.map((item) => (
-                  <div key={item.id} className="text-sm text-slate-300">
-                    <p>{item.event_type.replaceAll('_', ' ')}</p>
-                    <p className="mt-1 text-xs text-slate-600">{new Date(item.created_at).toLocaleString()}</p>
-                  </div>
-                ))}
-                {!meaningfulActivity.length ? <p className="text-sm text-slate-400">No project activity yet.</p> : null}
-              </div>
-            </div>
-          </div>
-        ) : null}
-
-        {showObjectives || showTasks ? (
-          <div className="grid gap-5 xl:grid-cols-[1fr_360px]">
-            <div className="space-y-3">
-              {showObjectives
-                ? (overview?.objectives || []).map((objective) => (
-                    <div key={objective.id} className={`${workspaceSurface} p-4`}>
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                          <p className="text-lg font-semibold text-white">{objective.title}</p>
-                          <p className="mt-2 text-sm leading-6 text-slate-400">{objective.description || 'No description yet.'}</p>
-                        </div>
-                        <div className="flex gap-2 text-xs uppercase">
-                          <span className={mutedPill}>{objective.status}</span>
-                          <span className={activePill}>{objective.priority}</span>
-                        </div>
-                      </div>
-                      <div className={`${workspaceInset} mt-4 p-3`}>
-                        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Tasks</p>
-                        <div className="mt-2 space-y-2">
-                          {(overview?.tasks || []).filter((task) => task.objective_id === objective.id).map((task) => (
-                            <TaskRow key={task.id} task={task} />
-                          ))}
-                          {!objectiveTaskCount(objective.id) ? <p className="text-sm text-slate-500">No tasks linked yet.</p> : null}
-                        </div>
-                      </div>
-                    </div>
-                  ))
-                : null}
-
-              {showTasks && activeWorkFilter === 'tasks'
-                ? openTasks.map((task) => <TaskRow key={task.id} task={task} />)
-                : null}
-
-              {showObjectives && !overview?.objectives.length ? (
-                <p className={`${workspaceSurface} p-4 text-sm text-slate-400`}>No objectives yet. Create the first objective to organize the project.</p>
-              ) : null}
-              {activeWorkFilter === 'tasks' && !openTasks.length ? <p className={`${workspaceSurface} p-4 text-sm text-slate-400`}>No open tasks yet.</p> : null}
-            </div>
-
-            <div className="space-y-5">
-              {(activeWorkFilter === 'all' || activeWorkFilter === 'objectives') ? (
-                <form onSubmit={createObjective} className={`${workspaceSurface} p-4`}>
-                  <p className="text-sm font-semibold text-white">Create Objective</p>
-                  <input value={objectiveForm.title} onChange={(event) => setObjectiveForm((current) => ({ ...current, title: event.target.value }))} className={`${workspaceField} mt-3`} placeholder="Objective title" />
-                  <textarea value={objectiveForm.description} onChange={(event) => setObjectiveForm((current) => ({ ...current, description: event.target.value }))} className={`${workspaceField} mt-3 resize-none`} rows={3} placeholder="Why this matters and what success looks like" />
-                  <div className="mt-3 grid grid-cols-2 gap-2">
-                    <select value={objectiveForm.priority} onChange={(event) => setObjectiveForm((current) => ({ ...current, priority: event.target.value }))} className={workspaceSelect}>
-                      {['low', 'medium', 'high', 'critical'].map((priority) => <option key={priority}>{priority}</option>)}
-                    </select>
-                    <select value={objectiveForm.stage} onChange={(event) => setObjectiveForm((current) => ({ ...current, stage: event.target.value }))} className={workspaceSelect}>
-                      {stages.map((stage) => <option key={stage}>{stage}</option>)}
-                    </select>
-                  </div>
-                  <button disabled={workspaceBusy} className={`${primaryAction} mt-3 w-full`}>Create Objective</button>
-                </form>
-              ) : null}
-
-              {(activeWorkFilter === 'all' || activeWorkFilter === 'tasks') ? (
-                <form onSubmit={createTask} className={`${workspaceSurface} p-4`}>
-                  <p className="text-sm font-semibold text-white">Create Task</p>
-                  <input value={taskForm.title} onChange={(event) => setTaskForm((current) => ({ ...current, title: event.target.value }))} className={`${workspaceField} mt-3`} placeholder="Task title" />
-                  <textarea value={taskForm.description} onChange={(event) => setTaskForm((current) => ({ ...current, description: event.target.value }))} className={`${workspaceField} mt-3 resize-none`} rows={3} placeholder="Task details" />
-                  <select value={taskForm.objective_id} onChange={(event) => setTaskForm((current) => ({ ...current, objective_id: event.target.value }))} className={`${workspaceSelect} mt-3`}>
-                    <option value="">No objective</option>
-                    {(overview?.objectives || []).map((objective) => <option key={objective.id} value={objective.id}>{objective.title}</option>)}
-                  </select>
-                  <div className="mt-3 grid grid-cols-2 gap-2">
-                    <select value={taskForm.suggested_role} onChange={(event) => setTaskForm((current) => ({ ...current, suggested_role: event.target.value }))} className={workspaceSelect}>
-                      {contributionRoles.map((role) => <option key={role} value={role}>{roleLabels[role]}</option>)}
-                    </select>
-                    <select value={taskForm.priority} onChange={(event) => setTaskForm((current) => ({ ...current, priority: event.target.value }))} className={workspaceSelect}>
-                      {['low', 'medium', 'high', 'critical'].map((priority) => <option key={priority}>{priority}</option>)}
-                    </select>
-                  </div>
-                  <button disabled={workspaceBusy} className={`${primaryAction} mt-3 w-full`}>Create Task</button>
-                </form>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
+        <div className="grid gap-3">
+          {showObjectives ? (overview?.objectives || []).map((objective) => (
+            <article key={objective.id} className={`${workspaceSurface} p-4`}>
+              <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-base font-semibold text-white">{objective.title}</p><p className="mt-1 text-sm text-slate-400">{objective.description || 'No description yet.'}</p></div><div className="flex gap-2"><span className={mutedPill}>{objective.status}</span><span className={activePill}>{objective.priority}</span></div></div>
+              <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500"><span>{objectiveTaskCount(objective.id)} linked tasks</span><span>Stage: {objective.stage || currentStage}</span></div>
+            </article>
+          )) : (overview?.tasks || []).map((task) => (
+            <article key={task.id} className={`${workspaceSurface} flex flex-wrap items-center justify-between gap-3 p-4`}><div className="min-w-0"><p className="text-sm font-semibold text-white">{task.title}</p><p className="mt-1 text-xs text-slate-500">{taskType(task)} · {overview?.objectives.find((objective) => objective.id === task.objective_id)?.title || 'No objective'} · {taskAssignee(task)}</p></div><div className="flex gap-2"><span className={mutedPill}>{task.status}</span><span className={activePill}>{task.priority}</span></div></article>
+          ))}
+          {showObjectives && !overview?.objectives.length ? <p className={`${workspaceSurface} p-4 text-sm text-slate-400`}>No objectives yet. Use + New to define the first outcome.</p> : null}
+          {!showObjectives && !overview?.tasks.length ? <p className={`${workspaceSurface} p-4 text-sm text-slate-400`}>No tasks yet. Use + New to add the next piece of work.</p> : null}
+        </div>
       </section>
     )
   }
@@ -1403,13 +1324,13 @@ export default function ProjectWorkspace() {
           <aside className={`${workspaceSurface} min-h-[320px] overflow-hidden p-4`}>
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-teal-300">Rooms</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-teal-300">Discuss</p>
                 <h2 className="mt-1 text-lg font-semibold text-white">Team conversations</h2>
               </div>
               {totalUnread ? <span className="rounded-full bg-teal-400 px-2.5 py-1 text-xs font-bold text-slate-950">{totalUnread}</span> : null}
             </div>
             <p className="mt-2 text-sm leading-6 text-slate-400">
-              Discussions stay connected to the project. Role rooms are emphasized by contribution type, not locked away.
+              Project-wide and topic conversations stay connected to this project.
             </p>
 
             <div className="mt-5 space-y-5 overflow-auto pr-1">
@@ -1424,14 +1345,14 @@ export default function ProjectWorkspace() {
                 <div className="mb-2 flex items-center justify-between">
                   <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Project</p>
                   <button type="button" disabled={roomsBusy} onClick={() => void createCustomRoom()} className="text-xs font-semibold text-teal-300 hover:text-teal-200 disabled:opacity-60">
-                    New room
+                    New discussion
                   </button>
                 </div>
                 <div className="space-y-2">{projectRooms.map(renderRoomButton)}</div>
               </div>
 
               <div>
-                <p className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Role rooms</p>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Topic / role rooms</p>
                 <div className="space-y-2">{roleRooms.map(renderRoomButton)}</div>
               </div>
 
@@ -1516,9 +1437,9 @@ export default function ProjectWorkspace() {
             ) : (
               <div className="grid flex-1 place-items-center p-6 text-center">
                 <div>
-                  <p className="text-lg font-semibold text-slate-300">Rooms unavailable</p>
+                  <p className="text-lg font-semibold text-slate-300">Discussions unavailable</p>
                   <p className="mt-2 max-w-md text-sm leading-6 text-slate-500">
-                    Run the Project Rooms migration, then reload the workspace to seed general and role rooms.
+                    Run the Project Rooms migration, then reload to enable project and topic conversations.
                   </p>
                 </div>
               </div>
@@ -1560,17 +1481,15 @@ export default function ProjectWorkspace() {
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,rgba(20,184,166,0.16),transparent_34%),linear-gradient(135deg,#020617_0%,#0f172a_42%,#020617_100%)] text-slate-100">
-      <header className="sticky top-0 z-20 border-b border-slate-800/80 bg-slate-950/90 px-5 backdrop-blur">
-        <div className="flex min-h-[72px] flex-wrap items-center justify-between gap-4 py-3">
+      <header className="sticky top-0 z-20 border-b border-slate-800/80 bg-slate-950/90 px-4 backdrop-blur">
+        <div className="flex min-h-12 flex-wrap items-center justify-between gap-x-4 gap-y-2 py-2">
           <div className="flex items-center gap-4">
-            <Link href="/feed" className="rounded-full border border-slate-700/80 bg-slate-900 px-3 py-1.5 text-sm text-teal-200 transition hover:border-teal-500/60 hover:bg-teal-950/40">
-              Back to ideas
+            <Link href="/feed" className="text-sm font-semibold text-teal-200 transition hover:text-teal-100">
+              ← Ideas
             </Link>
             <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-teal-300">Project Space</p>
-              <p className="mt-1 text-lg font-semibold text-white">{overview?.project.name || 'Project Workspace'}</p>
+              <p className="text-base font-semibold text-white">{overview?.project.name || 'Project Workspace'}</p>
               <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-400">
-                <span>Stage</span>
                 <select
                   value={currentStage}
                   disabled={workspaceBusy}
@@ -1584,35 +1503,35 @@ export default function ProjectWorkspace() {
                   ))}
                 </select>
                 <span>•</span>
-                <span>{progress}% complete</span>
+                <span className={mutedPill}>{progress}% complete</span>
                 <span>•</span>
-                <span>{presenceLabel}</span>
+                <span>{teamMembers.length} member{teamMembers.length === 1 ? '' : 's'} · {presenceLabel}</span>
               </div>
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-3 text-sm text-slate-400">
-            <span>{connectionStatus === 'Offline' ? 'Offline' : 'Live editing ready'}</span>
+          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
+            <span>{connectionStatus === 'Offline' ? 'Offline' : 'Online'}</span>
             {totalUnread ? (
-              <button type="button" onClick={() => setActiveWorkspaceTab('rooms')} className="font-semibold text-teal-300 hover:text-teal-200">
+              <button type="button" onClick={() => setActiveWorkspaceTab('discuss')} className="font-semibold text-teal-300 hover:text-teal-200">
                 {totalUnread} unread
               </button>
             ) : null}
           </div>
         </div>
 
-        <nav className="flex items-center gap-2 overflow-x-auto pb-3">
+        <nav className="flex items-center gap-1 overflow-x-auto">
           {workspaceTabs.map((tab) => (
             <button
               key={tab}
               type="button"
               onClick={() => setActiveWorkspaceTab(tab)}
-              className={`rounded-full px-3.5 py-2 text-sm font-semibold capitalize transition ${
+              className={`border-b-2 px-3 py-2 text-sm font-semibold capitalize transition ${
                 activeWorkspaceTab === tab
-                  ? 'bg-teal-400 text-slate-950 shadow-lg shadow-teal-950/30'
-                  : 'border border-slate-800 bg-slate-900/70 text-slate-400 hover:border-slate-700 hover:bg-slate-800 hover:text-slate-200'
+                  ? 'border-teal-400 text-teal-200'
+                  : 'border-transparent text-slate-400 hover:border-slate-700 hover:text-slate-200'
               }`}
             >
-              {tab}
+              {tab === 'discuss' ? 'Discuss' : tab}
             </button>
           ))}
         </nav>
@@ -1620,7 +1539,7 @@ export default function ProjectWorkspace() {
 
       {activeWorkspaceTab === 'overview' ? renderOverview() : null}
       {activeWorkspaceTab === 'work' ? renderWork() : null}
-      {activeWorkspaceTab === 'rooms' ? renderRooms() : null}
+      {activeWorkspaceTab === 'discuss' ? renderRooms() : null}
 
       {activeWorkspaceTab === 'build' ? (
         <>
@@ -1742,6 +1661,38 @@ export default function ProjectWorkspace() {
         />
       ) : null}
         </>
+      ) : null}
+
+      {newWorkItem ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/80 p-4 backdrop-blur">
+          <div className={`${workspaceSurface} w-full max-w-xl p-5`}>
+            <div className="flex items-start justify-between gap-4">
+              <div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-teal-300">New work</p><h2 className="mt-1 text-xl font-semibold text-white">Create {newWorkItem}</h2></div>
+              <button type="button" onClick={() => setNewWorkItem(null)} className={secondaryAction}>Close</button>
+            </div>
+            <div className="mt-4 flex gap-2">
+              {(['objective', 'task'] as NewWorkItem[]).map((item) => <button key={item} type="button" onClick={() => setNewWorkItem(item)} className={newWorkItem === item ? activePill : mutedPill}>{item}</button>)}
+            </div>
+            {workspaceError ? <div role="alert" className="mt-4 rounded-xl border border-rose-900/80 bg-rose-950/60 p-3 text-sm text-rose-200">{workspaceError}</div> : null}
+            {newWorkItem === 'objective' ? (
+              <form onSubmit={async (event) => { if (await createObjective(event)) setNewWorkItem(null) }} className="mt-4">
+                <input value={objectiveForm.title} onChange={(event) => setObjectiveForm((current) => ({ ...current, title: event.target.value }))} className={workspaceField} placeholder="Objective title" autoFocus />
+                <textarea value={objectiveForm.description} onChange={(event) => setObjectiveForm((current) => ({ ...current, description: event.target.value }))} className={`${workspaceField} mt-3 resize-none`} rows={4} placeholder="Why this matters and what success looks like" />
+                <div className="mt-3 grid grid-cols-2 gap-2"><select value={objectiveForm.priority} onChange={(event) => setObjectiveForm((current) => ({ ...current, priority: event.target.value }))} className={workspaceSelect}>{['low', 'medium', 'high', 'critical'].map((priority) => <option key={priority}>{priority}</option>)}</select><select value={objectiveForm.stage} onChange={(event) => setObjectiveForm((current) => ({ ...current, stage: event.target.value }))} className={workspaceSelect}>{stages.map((stage) => <option key={stage}>{stage}</option>)}</select></div>
+                <button disabled={workspaceBusy} className={`${primaryAction} mt-4 w-full`}>Create Objective</button>
+              </form>
+            ) : (
+              <form onSubmit={async (event) => { if (await createTask(event)) setNewWorkItem(null) }} className="mt-4">
+                <input value={taskForm.title} onChange={(event) => setTaskForm((current) => ({ ...current, title: event.target.value }))} className={workspaceField} placeholder="Task title" autoFocus />
+                <textarea value={taskForm.description} onChange={(event) => setTaskForm((current) => ({ ...current, description: event.target.value }))} className={`${workspaceField} mt-3 resize-none`} rows={4} placeholder="Task details" />
+                <select aria-label="Associated objective" value={taskForm.objective_id} onChange={(event) => setTaskForm((current) => ({ ...current, objective_id: event.target.value }))} className={`${workspaceSelect} mt-3`}><option value="">No objective</option>{(overview?.objectives || []).map((objective) => <option key={objective.id} value={objective.id}>{objective.title}</option>)}</select>
+                <select aria-label="Assignee" value={taskForm.assigned_to} onChange={(event) => setTaskForm((current) => ({ ...current, assigned_to: event.target.value }))} className={`${workspaceSelect} mt-3`}><option value="">Unassigned</option>{teamMembers.filter((member) => member.user_id).map((member) => <option key={member.id} value={member.user_id || ''}>{member.member_name || member.user?.email || member.member_email || 'Project member'}</option>)}</select>
+                <div className="mt-3 grid grid-cols-2 gap-2"><select value={taskForm.suggested_role} onChange={(event) => setTaskForm((current) => ({ ...current, suggested_role: event.target.value }))} className={workspaceSelect}><option value="any">General</option><option value="researcher">Research</option><option value="designer">Design</option><option value="coder">Engineering</option><option value="builder">Testing</option><option value="thinker">Documentation</option><option value="entrepreneur">Outreach</option></select><select value={taskForm.priority} onChange={(event) => setTaskForm((current) => ({ ...current, priority: event.target.value }))} className={workspaceSelect}>{['low', 'medium', 'high', 'critical'].map((priority) => <option key={priority}>{priority}</option>)}</select></div>
+                <button disabled={workspaceBusy} className={`${primaryAction} mt-4 w-full`}>Create Task</button>
+              </form>
+            )}
+          </div>
+        </div>
       ) : null}
 
       {(teamPanelOpen || addMembersOpen) ? (

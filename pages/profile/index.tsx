@@ -235,7 +235,7 @@ export default function ProfilePage() {
                   <p className="mt-1 text-sm text-slate-600">{request.status || 'pending'}</p>
                 </Link>
               ))}
-              {!dashboard.invitations.length && !dashboard.requests.length ? <div className="rounded-2xl border border-dashed border-slate-300 p-6 text-sm text-slate-600">No pending requests. You're all caught up.</div> : null}
+              {!dashboard.invitations.length && !dashboard.requests.length ? <div className="rounded-2xl border border-dashed border-slate-300 p-6 text-sm text-slate-600">No pending requests. You&apos;re all caught up.</div> : null}
             </div>
           </section>
         )}

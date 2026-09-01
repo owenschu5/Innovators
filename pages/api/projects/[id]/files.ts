@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next'
-import { supabase } from '../../../../lib/supabaseClient'
+import { authenticatedSupabase } from '../../../../lib/supabaseServer'
 
 type WorkspaceMember = {
   permissions?: string | null
@@ -37,29 +37,25 @@ function cleanName(value: unknown) {
 }
 
 async function access(req: NextApiRequest, id: string) {
-  const token = req.headers.authorization?.replace(/^Bearer\s+/i, '')
-  if (!token) throw new Error('Authentication required')
+  const { db, user } = await authenticatedSupabase(req)
 
-  const { data: auth } = await supabase.auth.getUser(token)
-  if (!auth.user) throw new Error('Authentication required')
-
-  const { data: project, error: projectError } = await supabase
+  const { data: project, error: projectError } = await db
     .from('idea_groups')
     .select('id, workspace_active, status, name')
     .eq('id', id)
     .single()
   if (projectError || !project?.workspace_active || project.status !== 'approved') throw new Error('Workspace unavailable')
 
-  const { data: member, error: memberError } = await supabase
+  const { data: member, error: memberError } = await db
     .from('idea_group_members')
     .select('permissions')
     .eq('group_id', id)
-    .eq('user_id', auth.user.id)
+    .eq('user_id', user.id)
     .eq('invitation_status', 'accepted')
     .maybeSingle()
   if (memberError || !member) throw new Error('Workspace access denied')
 
-  const { data: workspace, error: workspaceError } = await supabase
+  const { data: workspace, error: workspaceError } = await db
     .from('project_workspaces')
     .upsert({ project_group_id: id, name: project.name || `Project ${id}` }, { onConflict: 'project_group_id' })
     .select('*')
@@ -69,11 +65,11 @@ async function access(req: NextApiRequest, id: string) {
   }
   if (workspaceError || !workspace) throw new Error(workspaceError?.message || 'Workspace unavailable')
 
-  return { user: auth.user, workspace, member }
+  return { db, user, workspace, member }
 }
 
-async function getNode(nodeId: unknown, workspaceId: string) {
-  const { data, error } = await supabase
+async function getNode(db: Awaited<ReturnType<typeof authenticatedSupabase>>['db'], nodeId: unknown, workspaceId: string) {
+  const { data, error } = await db
     .from('workspace_nodes')
     .select('*')
     .eq('id', String(nodeId || ''))
@@ -88,10 +84,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const { id } = req.query
     if (typeof id !== 'string') return res.status(400).json({ error: 'Missing project id' })
 
-    const { user, workspace, member } = await access(req, id)
+    const { db, user, workspace, member } = await access(req, id)
 
     if (req.method === 'GET') {
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from('workspace_nodes')
         .select('*')
         .eq('workspace_id', workspace.id)
@@ -109,11 +105,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (!['file', 'folder'].includes(nodeType)) return res.status(400).json({ error: 'Invalid node type' })
 
       if (parentId) {
-        const parent = await getNode(parentId, workspace.id)
+        const parent = await getNode(db, parentId, workspace.id)
         if (parent.node_type !== 'folder') return res.status(400).json({ error: 'Invalid parent folder' })
       }
 
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from('workspace_nodes')
         .insert({
           workspace_id: workspace.id,
@@ -130,35 +126,35 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(201).json({ node: data })
     }
 
-    const node = await getNode(req.body.node_id, workspace.id)
+    const node = await getNode(db, req.body.node_id, workspace.id)
 
     if (req.method === 'PUT') {
       if (!canEdit(member)) return res.status(403).json({ error: 'Read-only access' })
       if (node.node_type !== 'file') return res.status(400).json({ error: 'Only files can be saved' })
       const content = String(req.body.content ?? '')
       const nextVersion = Number(node.version || 0) + 1
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from('workspace_nodes')
         .update({ content, version: nextVersion, updated_by: user.id, updated_at: new Date().toISOString() })
         .eq('id', node.id)
         .select('*')
         .single()
       if (error) throw error
-      await supabase.from('workspace_file_versions').insert({ node_id: node.id, version: data.version, content, changed_by: user.id, source: 'manual-save' })
+      await db.from('workspace_file_versions').insert({ node_id: node.id, version: data.version, content, changed_by: user.id, source: 'manual-save' })
       return res.status(200).json({ node: data })
     }
 
     if (req.method === 'PATCH') {
       if (!canEdit(member)) return res.status(403).json({ error: 'Read-only access' })
       const name = cleanName(req.body.name)
-      const { data, error } = await supabase.from('workspace_nodes').update({ name, updated_by: user.id }).eq('id', node.id).select('*').single()
+      const { data, error } = await db.from('workspace_nodes').update({ name, updated_by: user.id }).eq('id', node.id).select('*').single()
       if (error) throw error
       return res.status(200).json({ node: data })
     }
 
     if (req.method === 'DELETE') {
       if (!canEdit(member)) return res.status(403).json({ error: 'Read-only access' })
-      const { error } = await supabase.from('workspace_nodes').delete().eq('id', node.id)
+      const { error } = await db.from('workspace_nodes').delete().eq('id', node.id)
       if (error) throw error
       return res.status(200).json({ deleted: node.id })
     }

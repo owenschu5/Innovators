@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next'
-import { supabase } from '../../../../lib/supabaseClient'
+import { authenticatedSupabase } from '../../../../lib/supabaseServer'
 
 const contributionRoles = ['builder', 'thinker', 'coder', 'researcher', 'designer', 'entrepreneur']
 const permissionRoles = ['project_lead', 'lead', 'member', 'contributor', 'viewer']
@@ -77,25 +77,17 @@ function missingRoleNeeds(error: unknown) {
   )
 }
 
-async function userFromRequest(req: NextApiRequest) {
-  const token = req.headers.authorization?.replace(/^Bearer\s+/i, '')
-  if (!token) return null
-  const { data } = await supabase.auth.getUser(token)
-  return data.user || null
-}
-
 async function access(req: NextApiRequest, groupId: string) {
-  const user = await userFromRequest(req)
-  if (!user) throw new Error('Authentication required')
+  const { db, user } = await authenticatedSupabase(req)
 
-  const { data: group, error: groupError } = await supabase
+  const { data: group, error: groupError } = await db
     .from('idea_groups')
     .select('id, idea_id, name, lead_user_id, lead_email, created_by, status, workspace_active')
     .eq('id', groupId)
     .single()
   if (groupError || !group) throw new Error('Project not found')
 
-  const { data: member, error: memberError } = await supabase
+  const { data: member, error: memberError } = await db
     .from('idea_group_members')
     .select('id, permissions, member_role, member_email, is_lead, invitation_status')
     .eq('group_id', groupId)
@@ -112,7 +104,7 @@ async function access(req: NextApiRequest, groupId: string) {
     normalizeEmail(group.lead_email) === actorEmail ||
     group.created_by === user.id
 
-  return { user, group, member, canManage }
+  return { db, user, group, member, canManage }
 }
 
 function statusFor(error: unknown) {
@@ -124,12 +116,14 @@ function statusFor(error: unknown) {
   return 500
 }
 
-async function logActivity(groupId: string, actorId: string, eventType: string, metadata: Record<string, unknown> = {}) {
-  await supabase.from('project_activities').insert({ group_id: groupId, actor_id: actorId, event_type: eventType, metadata })
+type RequestDb = Awaited<ReturnType<typeof authenticatedSupabase>>['db']
+
+async function logActivity(db: RequestDb, groupId: string, actorId: string, eventType: string, metadata: Record<string, unknown> = {}) {
+  await db.from('project_activities').insert({ group_id: groupId, actor_id: actorId, event_type: eventType, metadata })
 }
 
-async function loadMembers(groupId: string) {
-  const { data, error } = await supabase
+async function loadMembers(db: RequestDb, groupId: string) {
+  const { data, error } = await db
     .from('idea_group_members')
     .select('*, user:users(id,email,profile_type,domains)')
     .eq('group_id', groupId)
@@ -138,8 +132,8 @@ async function loadMembers(groupId: string) {
   return (data || []) as MemberRow[]
 }
 
-async function loadRoleNeeds(groupId: string) {
-  const { data, error } = await supabase
+async function loadRoleNeeds(db: RequestDb, groupId: string) {
+  const { data, error } = await db
     .from('project_role_needs')
     .select('id, role, desired_count')
     .eq('group_id', groupId)
@@ -199,8 +193,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (typeof id !== 'string') return res.status(400).json({ error: 'Missing project id' })
 
     const accessData = await access(req, id)
-    const members = await loadMembers(id)
-    const roleNeeds = await loadRoleNeeds(id)
+    const members = await loadMembers(accessData.db, id)
+    const roleNeeds = await loadRoleNeeds(accessData.db, id)
     const coverage = buildCoverage(roleNeeds, members)
 
     if (req.method === 'GET') {
@@ -209,7 +203,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const role = normalizeRole(req.query.role)
       if (query || role || req.query.matches === '1') {
         if (!accessData.canManage) throw new Error('Only project leads can search members')
-        let userQuery = supabase
+        let userQuery = accessData.db
           .from('users')
           .select('id,email,profile_type,domains,availability_status,weekly_availability')
           .limit(30)
@@ -241,7 +235,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (requestedEmail && !isValidEmail(requestedEmail)) return res.status(400).json({ error: 'Enter a valid email address' })
       if (!requestedRole) return res.status(400).json({ error: 'Choose a contribution role' })
 
-      const candidateQuery = supabase.from('users').select('id,email,profile_type')
+      const candidateQuery = accessData.db.from('users').select('id,email,profile_type')
       const { data: candidate, error: candidateError } = userId
         ? await candidateQuery.eq('id', userId).maybeSingle()
         : await candidateQuery.eq('email', requestedEmail).maybeSingle()
@@ -252,7 +246,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const existing = members.find((member) => normalizeEmail(member.member_email) === candidateEmail || member.user_id === userId)
       if (existing) throw new Error('This collaborator is already invited or on the team')
 
-      const { data: member, error } = await supabase
+      const { data: member, error } = await accessData.db
         .from('idea_group_members')
         .insert({
           group_id: id,
@@ -269,13 +263,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (error || !member) throw new Error(error?.message || 'Unable to invite collaborator')
 
       if (candidate?.id) {
-        await supabase.from('notifications').insert({
+        await accessData.db.from('notifications').insert({
           user_id: candidate.id,
           type: 'project_invitation',
           related_idea_id: accessData.group.idea_id,
         })
       }
-      await logActivity(id, accessData.user.id, 'collaborator_invited', {
+      await logActivity(accessData.db, id, accessData.user.id, 'collaborator_invited', {
         user_id: candidate?.id || null,
         member_email: candidateEmail,
         member_id: member.id,
@@ -294,9 +288,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         const desiredCount = Math.max(Number(req.body.desired_count || 0), 0)
         if (!role) return res.status(400).json({ error: 'Invalid role' })
 
-        await supabase.from('project_role_needs').delete().eq('group_id', id).eq('role', role)
+        await accessData.db.from('project_role_needs').delete().eq('group_id', id).eq('role', role)
         if (desiredCount > 0) {
-          const { error } = await supabase.from('project_role_needs').insert({
+          const { error } = await accessData.db.from('project_role_needs').insert({
             group_id: id,
             idea_id: accessData.group.idea_id,
             role,
@@ -306,7 +300,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           })
           if (error) throw error
         }
-        await logActivity(id, accessData.user.id, 'team_role_needs_changed', { role, desired_count: desiredCount })
+        await logActivity(accessData.db, id, accessData.user.id, 'team_role_needs_changed', { role, desired_count: desiredCount })
         return res.status(200).json({ ok: true })
       }
 
@@ -325,9 +319,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           updates.is_lead = ['project_lead', 'lead'].includes(permission)
         }
         if (!Object.keys(updates).length) return res.status(400).json({ error: 'No member updates provided' })
-        const { data, error } = await supabase.from('idea_group_members').update(updates).eq('id', memberId).eq('group_id', id).select('*').single()
+        const { data, error } = await accessData.db.from('idea_group_members').update(updates).eq('id', memberId).eq('group_id', id).select('*').single()
         if (error || !data) throw new Error(error?.message || 'Unable to update member')
-        await logActivity(id, accessData.user.id, 'member_updated', { member_id: memberId, ...updates })
+        await logActivity(accessData.db, id, accessData.user.id, 'member_updated', { member_id: memberId, ...updates })
         return res.status(200).json({ member: data })
       }
 
@@ -336,7 +330,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         const memberId = clean(req.body.member_id)
         const member = members.find((item) => item.id === memberId && item.invitation_status === 'invited')
         if (!member) throw new Error('Invitation not found')
-        const { data, error } = await supabase
+        const { data, error } = await accessData.db
           .from('idea_group_members')
           .update({ invitation_status: 'cancelled', responded_at: new Date().toISOString() })
           .eq('id', memberId)
@@ -344,7 +338,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           .select('*')
           .single()
         if (error || !data) throw new Error(error?.message || 'Unable to cancel invitation')
-        await logActivity(id, accessData.user.id, 'invitation_cancelled', { member_id: memberId })
+        await logActivity(accessData.db, id, accessData.user.id, 'invitation_cancelled', { member_id: memberId })
         return res.status(200).json({ member: data })
       }
 
@@ -357,7 +351,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           const leadCount = members.filter((item) => item.invitation_status === 'accepted' && item.is_lead).length
           if (leadCount <= 1) throw new Error('The only project lead cannot be removed')
         }
-        const { data, error } = await supabase
+        const { data, error } = await accessData.db
           .from('idea_group_members')
           .update({ invitation_status: 'removed', responded_at: new Date().toISOString() })
           .eq('id', memberId)
@@ -365,7 +359,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           .select('*')
           .single()
         if (error || !data) throw new Error(error?.message || 'Unable to remove member')
-        await logActivity(id, accessData.user.id, 'member_removed', { member_id: memberId, user_id: member.user_id })
+        await logActivity(accessData.db, id, accessData.user.id, 'member_removed', { member_id: memberId, user_id: member.user_id })
         return res.status(200).json({ member: data })
       }
 
@@ -376,7 +370,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           const leadCount = members.filter((item) => item.invitation_status === 'accepted' && item.is_lead).length
           if (leadCount <= 1) throw new Error('Project lead cannot leave until another project lead exists')
         }
-        const { data, error } = await supabase
+        const { data, error } = await accessData.db
           .from('idea_group_members')
           .update({ invitation_status: 'left', responded_at: new Date().toISOString() })
           .eq('id', member.id)
@@ -384,7 +378,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           .select('*')
           .single()
         if (error || !data) throw new Error(error?.message || 'Unable to leave project')
-        await logActivity(id, accessData.user.id, 'member_left', { member_id: member.id })
+        await logActivity(accessData.db, id, accessData.user.id, 'member_left', { member_id: member.id })
         return res.status(200).json({ member: data })
       }
 

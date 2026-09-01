@@ -27,11 +27,11 @@ function loadLocalEnv() {
 loadLocalEnv()
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 const port = Number(process.env.COLLAB_PORT || 1234)
 
 function requireConfig() {
-  if (!supabaseUrl || !supabaseKey) throw new Error('Supabase configuration is missing')
+  if (!supabaseUrl || !supabaseKey) throw new Error('NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for collaboration persistence')
 }
 
 function parseDocumentName(name) {

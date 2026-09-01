@@ -1,6 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next'
-import { createClient } from '@supabase/supabase-js'
-import { supabase } from '../../../../lib/supabaseClient'
+import { authenticatedSupabase } from '../../../../lib/supabaseServer'
 
 const roomTypes = ['general', 'announcement', 'role', 'objective', 'custom']
 
@@ -116,23 +115,8 @@ function canPostAnnouncement(member: { permissions?: string | null; is_lead?: bo
   return Boolean(member.is_lead || ['admin', 'owner', 'lead'].includes(member.permissions || ''))
 }
 
-function requestDb(token: string) {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || 'http://localhost:54321'
-  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'anon'
-  return createClient(url, key, {
-    global: { headers: { Authorization: `Bearer ${token}` } },
-    auth: { persistSession: false },
-  })
-}
-
 async function access(req: NextApiRequest, groupId: string) {
-  const token = req.headers.authorization?.replace(/^Bearer\s+/i, '')
-  if (!token) throw new Error('Authentication required')
-
-  const { data: auth } = await supabase.auth.getUser(token)
-  if (!auth.user) throw new Error('Authentication required')
-
-  const db = requestDb(token)
+  const { db, user } = await authenticatedSupabase(req)
 
   const { data: group, error: groupError } = await db
     .from('idea_groups')
@@ -145,7 +129,7 @@ async function access(req: NextApiRequest, groupId: string) {
     .from('idea_group_members')
     .select('id, permissions, member_role, is_lead')
     .eq('group_id', groupId)
-    .eq('user_id', auth.user.id)
+    .eq('user_id', user.id)
     .eq('invitation_status', 'accepted')
     .maybeSingle()
   if (memberError || !member) throw new Error('Workspace access denied')
@@ -157,10 +141,12 @@ async function access(req: NextApiRequest, groupId: string) {
     .single()
   if (workspaceError || !workspace) throw new Error('Workspace not found')
 
-  return { db, user: auth.user, group, workspace, member }
+  return { db, user, group, workspace, member }
 }
 
-async function seedDefaultRooms(db: ReturnType<typeof requestDb>, workspaceId: string, userId: string) {
+type RequestDb = Awaited<ReturnType<typeof authenticatedSupabase>>['db']
+
+async function seedDefaultRooms(db: RequestDb, workspaceId: string, userId: string) {
   const rows = defaultRooms.map((room) => ({
     workspace_id: workspaceId,
     name: room.name,
@@ -175,7 +161,7 @@ async function seedDefaultRooms(db: ReturnType<typeof requestDb>, workspaceId: s
   if (error) throw error
 }
 
-async function loadRooms(db: ReturnType<typeof requestDb>, workspaceId: string, userId: string) {
+async function loadRooms(db: RequestDb, workspaceId: string, userId: string) {
   const [roomsResult, readsResult, messagesResult] = await Promise.all([
     db.from('workspace_rooms').select('*').eq('workspace_id', workspaceId).is('archived_at', null).order('created_at', { ascending: true }),
     db.from('workspace_room_reads').select('room_id,last_read_at').eq('workspace_id', workspaceId).eq('user_id', userId),
@@ -206,7 +192,7 @@ async function loadRooms(db: ReturnType<typeof requestDb>, workspaceId: string, 
   })
 }
 
-async function loadMessages(db: ReturnType<typeof requestDb>, workspaceId: string, roomId: string) {
+async function loadMessages(db: RequestDb, workspaceId: string, roomId: string) {
   const { data, error } = await db
     .from('workspace_messages')
     .select('*, user:users(id,email,profile_type)')
@@ -221,8 +207,8 @@ async function loadMessages(db: ReturnType<typeof requestDb>, workspaceId: strin
   return data || []
 }
 
-async function logActivity(groupId: string, actorId: string, eventType: string, metadata: Record<string, unknown>) {
-  await supabase.from('project_activities').insert({ group_id: groupId, actor_id: actorId, event_type: eventType, metadata })
+async function logActivity(db: RequestDb, groupId: string, actorId: string, eventType: string, metadata: Record<string, unknown>) {
+  await db.from('project_activities').insert({ group_id: groupId, actor_id: actorId, event_type: eventType, metadata })
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -270,7 +256,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           .single()
         if (missingRoomsSchema(error)) throw new Error('Rooms database tables are missing. Run sql/migrations/20260811_workspace_rooms_phase1.sql in Supabase, then reload the app.')
         if (error || !data) throw new Error(error?.message || 'Unable to create room')
-        await logActivity(accessData.group.id, accessData.user.id, 'workspace_room_created', { room_id: data.id, room: data.slug })
+        await logActivity(accessData.db, accessData.group.id, accessData.user.id, 'workspace_room_created', { room_id: data.id, room: data.slug })
         return res.status(201).json({ room: data })
       }
 
@@ -316,7 +302,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           .single()
         if (missingRoomsSchema(error)) throw new Error('Rooms database tables are missing. Run sql/migrations/20260811_workspace_rooms_phase1.sql in Supabase, then reload the app.')
         if (error || !data) throw new Error(error?.message || 'Unable to send message')
-        await logActivity(accessData.group.id, accessData.user.id, 'workspace_message_created', { room_id: room.id, room: room.slug })
+        await logActivity(accessData.db, accessData.group.id, accessData.user.id, 'workspace_message_created', { room_id: room.id, room: room.slug })
         return res.status(201).json({ message: data })
       }
 

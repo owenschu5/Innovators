@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next'
-import { supabase } from '../../../../lib/supabaseClient'
+import { authenticatedSupabase } from '../../../../lib/supabaseServer'
 
 type AiMode = 'ask' | 'plan' | 'edit' | 'build' | 'debug'
 type WorkspaceNode = {
@@ -57,41 +57,39 @@ function canEdit(permissions: string | null | undefined) {
 }
 
 async function access(req: NextApiRequest, groupId: string) {
-  const token = req.headers.authorization?.replace(/^Bearer\s+/i, '')
-  if (!token) throw new Error('Authentication required')
+  const { db, user } = await authenticatedSupabase(req)
 
-  const { data: auth } = await supabase.auth.getUser(token)
-  if (!auth.user) throw new Error('Authentication required')
-
-  const { data: group, error: groupError } = await supabase
+  const { data: group, error: groupError } = await db
     .from('idea_groups')
     .select('id, idea_id, name, status, workspace_active, summary')
     .eq('id', groupId)
     .single()
   if (groupError || !group?.workspace_active || group.status !== 'approved') throw new Error('Workspace unavailable')
 
-  const { data: member, error: memberError } = await supabase
+  const { data: member, error: memberError } = await db
     .from('idea_group_members')
     .select('permissions, member_role, is_lead')
     .eq('group_id', groupId)
-    .eq('user_id', auth.user.id)
+    .eq('user_id', user.id)
     .eq('invitation_status', 'accepted')
     .maybeSingle()
   if (memberError || !member) throw new Error('Workspace access denied')
 
-  const { data: workspace, error: workspaceError } = await supabase
+  const { data: workspace, error: workspaceError } = await db
     .from('project_workspaces')
     .select('*')
     .eq('project_group_id', groupId)
     .single()
   if (workspaceError || !workspace) throw new Error('Workspace not found')
 
-  const { data: idea } = await supabase.from('ideas').select('id, title, description').eq('id', group.idea_id).maybeSingle()
-  return { user: auth.user, group, idea, workspace, member }
+  const { data: idea } = await db.from('ideas').select('id, title, description').eq('id', group.idea_id).maybeSingle()
+  return { db, user, group, idea, workspace, member }
 }
 
-async function listFiles(workspaceId: string) {
-  const { data, error } = await supabase.from('workspace_nodes').select('*').eq('workspace_id', workspaceId).order('node_type').order('name')
+type RequestDb = Awaited<ReturnType<typeof authenticatedSupabase>>['db']
+
+async function listFiles(db: RequestDb, workspaceId: string) {
+  const { data, error } = await db.from('workspace_nodes').select('*').eq('workspace_id', workspaceId).order('node_type').order('name')
   if (error) throw error
   return addPaths((data || []) as WorkspaceNode[])
 }
@@ -201,8 +199,8 @@ If you are unsure which file to edit, answer with a plan and no changes.`
   return JSON.parse(content) as { answer?: string; summary?: string; changes?: AiChange[] }
 }
 
-async function createActivity(groupId: string, actorId: string, eventType: string, metadata: Record<string, unknown>, aiRunId?: string, changeSetId?: string) {
-  await supabase.from('project_activities').insert({
+async function createActivity(db: RequestDb, groupId: string, actorId: string, eventType: string, metadata: Record<string, unknown>, aiRunId?: string, changeSetId?: string) {
+  await db.from('project_activities').insert({
     group_id: groupId,
     actor_id: actorId,
     event_type: eventType,
@@ -213,12 +211,13 @@ async function createActivity(groupId: string, actorId: string, eventType: strin
 }
 
 async function createRun(data: {
+  db: RequestDb
   workspaceId: string
   userId: string
   mode: AiMode
   prompt: string
 }) {
-  const { data: run, error } = await supabase
+  const { data: run, error } = await data.db
     .from('workspace_ai_runs')
     .insert({
       workspace_id: data.workspaceId,
@@ -243,20 +242,20 @@ async function saveAiResult(run: any, accessData: Awaited<ReturnType<typeof acce
   const now = new Date().toISOString()
 
   if (!changes.length) {
-    const { data, error } = await supabase
+    const { data, error } = await accessData.db
       .from('workspace_ai_runs')
       .update({ status: 'applied', answer: aiResult.answer || aiResult.summary || 'Done.', completed_at: now })
       .eq('id', run.id)
       .select('*')
       .single()
     if (error) throw error
-    await createActivity(accessData.group.id, accessData.user.id, 'ai_answered', { mode: run.mode, prompt: run.prompt }, run.id)
+    await createActivity(accessData.db, accessData.group.id, accessData.user.id, 'ai_answered', { mode: run.mode, prompt: run.prompt }, run.id)
     return { run: data, changeSet: null, fileChanges: [] }
   }
 
   if (!canEdit(accessData.member.permissions)) throw new Error('Read-only access')
 
-  const { data: changeSet, error: changeSetError } = await supabase
+  const { data: changeSet, error: changeSetError } = await accessData.db
     .from('workspace_ai_change_sets')
     .insert({
       workspace_id: accessData.workspace.id,
@@ -287,10 +286,10 @@ async function saveAiResult(run: any, accessData: Awaited<ReturnType<typeof acce
     }
   })
 
-  const { data: fileChanges, error: fileChangeError } = await supabase.from('workspace_ai_file_changes').insert(rows).select('*')
+  const { data: fileChanges, error: fileChangeError } = await accessData.db.from('workspace_ai_file_changes').insert(rows).select('*')
   if (fileChangeError) throw fileChangeError
 
-  const { data: updatedRun, error: runError } = await supabase
+  const { data: updatedRun, error: runError } = await accessData.db
     .from('workspace_ai_runs')
     .update({ status: 'review_required', answer: aiResult.answer || aiResult.summary || 'AI changes are ready for review.', completed_at: now })
     .eq('id', run.id)
@@ -299,6 +298,7 @@ async function saveAiResult(run: any, accessData: Awaited<ReturnType<typeof acce
   if (runError) throw runError
 
   await createActivity(
+    accessData.db,
     accessData.group.id,
     accessData.user.id,
     'ai_changes_proposed',
@@ -309,10 +309,10 @@ async function saveAiResult(run: any, accessData: Awaited<ReturnType<typeof acce
   return { run: updatedRun, changeSet, fileChanges: fileChanges || [] }
 }
 
-async function ensureFolder(workspaceId: string, segments: string[], userId: string) {
+async function ensureFolder(db: RequestDb, workspaceId: string, segments: string[], userId: string) {
   let parentId: string | null = null
   for (const segment of segments) {
-    let query = supabase
+    let query = db
       .from('workspace_nodes')
       .select('*')
       .eq('workspace_id', workspaceId)
@@ -325,7 +325,7 @@ async function ensureFolder(workspaceId: string, segments: string[], userId: str
       continue
     }
 
-    const { data: created, error } = await supabase
+    const { data: created, error } = await db
       .from('workspace_nodes')
       .insert({ workspace_id: workspaceId, parent_id: parentId, name: segment, node_type: 'folder', created_by: userId, updated_by: userId })
       .select('*')
@@ -345,7 +345,7 @@ function splitPath(path: string | null | undefined) {
 async function applyChangeSet(changeSetId: string, accessData: Awaited<ReturnType<typeof access>>) {
   if (!canEdit(accessData.member.permissions)) throw new Error('Read-only access')
 
-  const { data: changeSet, error: changeSetError } = await supabase
+  const { data: changeSet, error: changeSetError } = await accessData.db
     .from('workspace_ai_change_sets')
     .select('*')
     .eq('id', changeSetId)
@@ -354,15 +354,15 @@ async function applyChangeSet(changeSetId: string, accessData: Awaited<ReturnTyp
   if (changeSetError || !changeSet) throw new Error('Change set not found')
   if (changeSet.status !== 'review_required') throw new Error('Change set is not awaiting review')
 
-  const { data: changes, error: changesError } = await supabase.from('workspace_ai_file_changes').select('*').eq('change_set_id', changeSet.id).order('created_at')
+  const { data: changes, error: changesError } = await accessData.db.from('workspace_ai_file_changes').select('*').eq('change_set_id', changeSet.id).order('created_at')
   if (changesError) throw changesError
 
   const applied: any[] = []
   for (const change of changes || []) {
     if (change.operation === 'create') {
       const { folders, name } = splitPath(change.proposed_path)
-      const parentId = await ensureFolder(accessData.workspace.id, folders, accessData.user.id)
-      const { data: node, error } = await supabase
+      const parentId = await ensureFolder(accessData.db, accessData.workspace.id, folders, accessData.user.id)
+      const { data: node, error } = await accessData.db
         .from('workspace_nodes')
         .insert({
           workspace_id: accessData.workspace.id,
@@ -376,12 +376,12 @@ async function applyChangeSet(changeSetId: string, accessData: Awaited<ReturnTyp
         .select('*')
         .single()
       if (error || !node) throw new Error(error?.message || 'Unable to create AI file')
-      await supabase.from('workspace_file_versions').insert({ node_id: node.id, version: node.version, content: node.content || '', changed_by: accessData.user.id, source: 'ai' })
+      await accessData.db.from('workspace_file_versions').insert({ node_id: node.id, version: node.version, content: node.content || '', changed_by: accessData.user.id, source: 'ai' })
       applied.push({ ...change, file_id: node.id, applied_node: node })
       continue
     }
 
-    const { data: current, error: currentError } = await supabase
+    const { data: current, error: currentError } = await accessData.db
       .from('workspace_nodes')
       .select('*')
       .eq('id', change.file_id)
@@ -394,35 +394,35 @@ async function applyChangeSet(changeSetId: string, accessData: Awaited<ReturnTyp
 
     if (change.operation === 'modify') {
       const nextVersion = Number(current.version || 0) + 1
-      const { data: node, error } = await supabase
+      const { data: node, error } = await accessData.db
         .from('workspace_nodes')
         .update({ content: change.proposed_content || '', version: nextVersion, updated_by: accessData.user.id, updated_at: new Date().toISOString() })
         .eq('id', current.id)
         .select('*')
         .single()
       if (error || !node) throw new Error(error?.message || 'Unable to apply AI change')
-      await supabase.from('workspace_file_versions').insert({ node_id: node.id, version: nextVersion, content: node.content || '', changed_by: accessData.user.id, source: 'ai' })
+      await accessData.db.from('workspace_file_versions').insert({ node_id: node.id, version: nextVersion, content: node.content || '', changed_by: accessData.user.id, source: 'ai' })
       applied.push({ ...change, applied_node: node })
     } else if (change.operation === 'delete') {
-      const { error } = await supabase.from('workspace_nodes').delete().eq('id', current.id)
+      const { error } = await accessData.db.from('workspace_nodes').delete().eq('id', current.id)
       if (error) throw error
       applied.push(change)
     }
   }
 
   const now = new Date().toISOString()
-  await supabase
+  await accessData.db
     .from('workspace_ai_change_sets')
     .update({ status: 'applied', accepted_by: accessData.user.id, accepted_at: now })
     .eq('id', changeSet.id)
-  await supabase.from('workspace_ai_runs').update({ status: 'applied', completed_at: now }).eq('id', changeSet.ai_run_id)
-  await createActivity(accessData.group.id, accessData.user.id, 'ai_changes_applied', { files_changed: applied.length }, changeSet.ai_run_id, changeSet.id)
+  await accessData.db.from('workspace_ai_runs').update({ status: 'applied', completed_at: now }).eq('id', changeSet.ai_run_id)
+  await createActivity(accessData.db, accessData.group.id, accessData.user.id, 'ai_changes_applied', { files_changed: applied.length }, changeSet.ai_run_id, changeSet.id)
 
   return { changeSet: { ...changeSet, status: 'applied', accepted_by: accessData.user.id, accepted_at: now }, appliedChanges: applied }
 }
 
 async function rejectChangeSet(changeSetId: string, accessData: Awaited<ReturnType<typeof access>>) {
-  const { data: changeSet, error } = await supabase
+  const { data: changeSet, error } = await accessData.db
     .from('workspace_ai_change_sets')
     .update({ status: 'rejected', rejected_by: accessData.user.id, rejected_at: new Date().toISOString() })
     .eq('id', changeSetId)
@@ -430,13 +430,13 @@ async function rejectChangeSet(changeSetId: string, accessData: Awaited<ReturnTy
     .select('*')
     .single()
   if (error || !changeSet) throw new Error(error?.message || 'Change set not found')
-  await supabase.from('workspace_ai_runs').update({ status: 'rejected' }).eq('id', changeSet.ai_run_id)
-  await createActivity(accessData.group.id, accessData.user.id, 'ai_changes_rejected', {}, changeSet.ai_run_id, changeSet.id)
+  await accessData.db.from('workspace_ai_runs').update({ status: 'rejected' }).eq('id', changeSet.ai_run_id)
+  await createActivity(accessData.db, accessData.group.id, accessData.user.id, 'ai_changes_rejected', {}, changeSet.ai_run_id, changeSet.id)
   return changeSet
 }
 
-async function getRuns(workspaceId: string) {
-  const { data: runs, error } = await supabase
+async function getRuns(db: RequestDb, workspaceId: string) {
+  const { data: runs, error } = await db
     .from('workspace_ai_runs')
     .select('*')
     .eq('workspace_id', workspaceId)
@@ -446,11 +446,11 @@ async function getRuns(workspaceId: string) {
   if (error) throw error
   const runIds = ((runs || []) as any[]).map((run: any) => run.id)
   const { data: changeSets } = runIds.length
-    ? await supabase.from('workspace_ai_change_sets').select('*').in('ai_run_id', runIds).order('created_at', { ascending: false })
+    ? await db.from('workspace_ai_change_sets').select('*').in('ai_run_id', runIds).order('created_at', { ascending: false })
     : { data: [] as any[] }
   const changeSetIds = ((changeSets || []) as any[]).map((changeSet: any) => changeSet.id)
   const { data: fileChanges } = changeSetIds.length
-    ? await supabase.from('workspace_ai_file_changes').select('*').in('change_set_id', changeSetIds).order('created_at')
+    ? await db.from('workspace_ai_file_changes').select('*').in('change_set_id', changeSetIds).order('created_at')
     : { data: [] as any[] }
   return { runs: runs || [], changeSets: changeSets || [], fileChanges: fileChanges || [] }
 }
@@ -462,7 +462,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const accessData = await access(req, id)
 
     if (req.method === 'GET') {
-      const data = await getRuns(accessData.workspace.id)
+      const data = await getRuns(accessData.db, accessData.workspace.id)
       return res.status(200).json(data)
     }
 
@@ -473,11 +473,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (!prompt) return res.status(400).json({ error: 'Missing prompt' })
       if (!canUseMode(accessData.member.permissions, mode)) return res.status(403).json({ error: 'Your workspace role cannot use this AI mode' })
 
-      const run = await createRun({ workspaceId: accessData.workspace.id, userId: accessData.user.id, mode, prompt })
-      await createActivity(accessData.group.id, accessData.user.id, 'ai_run_requested', { mode, prompt }, run.id)
+      const run = await createRun({ db: accessData.db, workspaceId: accessData.workspace.id, userId: accessData.user.id, mode, prompt })
+      await createActivity(accessData.db, accessData.group.id, accessData.user.id, 'ai_run_requested', { mode, prompt }, run.id)
 
       try {
-        const files = await listFiles(accessData.workspace.id)
+        const files = await listFiles(accessData.db, accessData.workspace.id)
         const contextFiles = relevantFiles(prompt, files, req.body.active_file_id || null)
         const aiResult = await callOpenAi({
           mode,
@@ -491,7 +491,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         return res.status(200).json({ ...saved, contextFiles: contextFiles.map(({ id, path, version }) => ({ id, path, version })) })
       } catch (error) {
         const message = error instanceof Error ? error.message : 'AI run failed'
-        await supabase.from('workspace_ai_runs').update({ status: 'failed', error: message, completed_at: new Date().toISOString() }).eq('id', run.id)
+        await accessData.db.from('workspace_ai_runs').update({ status: 'failed', error: message, completed_at: new Date().toISOString() }).eq('id', run.id)
         throw error
       }
     }
@@ -505,7 +505,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (action === 'cancel') {
         const runId = String(req.body.run_id || '')
         if (!runId) return res.status(400).json({ error: 'Missing run id' })
-        const { data, error } = await supabase.from('workspace_ai_runs').update({ status: 'cancelled', completed_at: new Date().toISOString() }).eq('id', runId).eq('workspace_id', accessData.workspace.id).select('*').single()
+        const { data, error } = await accessData.db.from('workspace_ai_runs').update({ status: 'cancelled', completed_at: new Date().toISOString() }).eq('id', runId).eq('workspace_id', accessData.workspace.id).select('*').single()
         if (error) throw error
         return res.status(200).json({ run: data })
       }

@@ -122,7 +122,7 @@ export default function ProfileSetup() {
                   What are your focus areas?
                 </h1>
                 <p className="text-gray-300 text-lg">
-                  Select one or more domains you're passionate about
+                  Select one or more domains you&apos;re passionate about
                 </p>
               </div>
 

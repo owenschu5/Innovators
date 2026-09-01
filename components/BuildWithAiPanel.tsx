@@ -1,11 +1,11 @@
 import { useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 
-export type AiMode = 'ask' | 'plan' | 'edit' | 'build' | 'debug'
+export type AiMode = 'ask' | 'plan' | 'change' | 'debug'
 
 export type AiRun = {
   id: string
-  mode: AiMode
+  mode: string
   prompt: string
   status: string
   answer?: string | null
@@ -41,12 +41,12 @@ type Props = {
   fileChanges: AiFileChange[]
   activeFileName?: string
   onToggle: () => void
-  onSubmit: (mode: AiMode, prompt: string) => Promise<void>
+  onSubmit: (mode: AiMode, prompt: string) => Promise<boolean>
   onAccept: (changeSetId: string) => Promise<void>
   onReject: (changeSetId: string) => Promise<void>
 }
 
-const modes: AiMode[] = ['ask', 'plan', 'edit', 'build', 'debug']
+const modes: AiMode[] = ['ask', 'plan', 'change', 'debug']
 const examples = [
   'Create a reusable button component and use it on this page.',
   'Explain how authentication works in this project.',
@@ -98,7 +98,7 @@ export default function BuildWithAiPanel({
   onAccept,
   onReject,
 }: Props) {
-  const [mode, setMode] = useState<AiMode>('build')
+  const [mode, setMode] = useState<AiMode>('change')
   const [prompt, setPrompt] = useState('')
   const [selectedChangeId, setSelectedChangeId] = useState<string | null>(null)
 
@@ -116,9 +116,11 @@ export default function BuildWithAiPanel({
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     if (!prompt.trim()) return
-    await onSubmit(mode, prompt.trim())
-    setPrompt('')
-    setSelectedChangeId(null)
+    const succeeded = await onSubmit(mode, prompt.trim())
+    if (succeeded) {
+      setPrompt('')
+      setSelectedChangeId(null)
+    }
   }
 
   if (!open) {
@@ -128,7 +130,7 @@ export default function BuildWithAiPanel({
         onClick={onToggle}
         className="fixed bottom-5 right-5 rounded-full bg-teal-400 px-4 py-3 text-sm font-semibold text-slate-950 shadow-xl shadow-teal-950/30 transition hover:bg-teal-300"
       >
-        Build with AI
+        Open AI Assistant
       </button>
     )
   }
@@ -138,7 +140,7 @@ export default function BuildWithAiPanel({
       <div className="border-b border-slate-800/80 bg-slate-950/40 p-4">
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-teal-300">Build with AI</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-teal-300">AI Assistant</p>
             <p className="mt-1 text-xs text-slate-500">{activeFileName ? `Active: ${activeFileName}` : 'Project-aware coding agent'}</p>
           </div>
           <button type="button" onClick={onToggle} className="rounded-full border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-400 transition hover:border-slate-700 hover:bg-slate-800 hover:text-slate-200">
@@ -146,7 +148,7 @@ export default function BuildWithAiPanel({
           </button>
         </div>
 
-        <div className="mt-4 grid grid-cols-5 gap-1 rounded-full border border-slate-800/80 bg-slate-950/70 p-1">
+        <div className="mt-4 grid grid-cols-4 gap-1 rounded-full border border-slate-800/80 bg-slate-950/70 p-1">
           {modes.map((item) => (
             <button
               key={item}
@@ -168,7 +170,7 @@ export default function BuildWithAiPanel({
         {latestRun ? (
           <div className={`${panelInset} mb-4 p-3`}>
             <div className="flex items-center justify-between gap-3">
-              <p className="text-sm font-semibold text-slate-100">{latestRun.mode.toUpperCase()} run</p>
+              <p className="text-sm font-semibold text-slate-100">AI Run · {latestRun.mode === 'edit' || latestRun.mode === 'build' ? 'CHANGE' : latestRun.mode.toUpperCase()}</p>
               <span className={aiPill}>{latestRun.status}</span>
             </div>
             <p className="mt-2 text-xs leading-5 text-slate-400">{latestRun.prompt}</p>
@@ -257,7 +259,7 @@ export default function BuildWithAiPanel({
           onChange={(event) => setPrompt(event.target.value)}
           rows={4}
           className={`${aiField} resize-none`}
-          placeholder="What do you want to build?"
+          placeholder="Ask about the project or describe a change..."
         />
         <div className="mt-2 flex flex-wrap gap-2">
           {examples.slice(0, 3).map((example) => (

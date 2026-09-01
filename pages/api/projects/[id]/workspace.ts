@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next'
-import { supabase } from '../../../../lib/supabaseClient'
+import { authenticatedSupabase } from '../../../../lib/supabaseServer'
 
 const stages = ['define', 'validate', 'design', 'build', 'test', 'launch', 'improve']
 const objectiveStatuses = ['proposed', 'planned', 'in_progress', 'testing', 'blocked', 'complete', 'archived']
@@ -38,39 +38,35 @@ function clean(value: unknown) {
 }
 
 async function access(req: NextApiRequest, groupId: string) {
-  const token = req.headers.authorization?.replace(/^Bearer\s+/i, '')
-  if (!token) throw new Error('Authentication required')
+  const { db, user } = await authenticatedSupabase(req)
 
-  const { data: auth } = await supabase.auth.getUser(token)
-  if (!auth.user) throw new Error('Authentication required')
-
-  const { data: group, error: groupError } = await supabase
+  const { data: group, error: groupError } = await db
     .from('idea_groups')
     .select('id, idea_id, name, summary, status, workspace_active, lead_user_id')
     .eq('id', groupId)
     .single()
   if (groupError || !group?.workspace_active || group.status !== 'approved') throw new Error('Workspace unavailable')
 
-  const { data: member, error: memberError } = await supabase
+  const { data: member, error: memberError } = await db
     .from('idea_group_members')
     .select('id, permissions, member_role, is_lead')
     .eq('group_id', groupId)
-    .eq('user_id', auth.user.id)
+    .eq('user_id', user.id)
     .eq('invitation_status', 'accepted')
     .maybeSingle()
   if (memberError || !member) throw new Error('Workspace access denied')
 
-  const { data: workspace, error: workspaceError } = await supabase
+  const { data: workspace, error: workspaceError } = await db
     .from('project_workspaces')
     .select('*')
     .eq('project_group_id', groupId)
     .single()
   if (workspaceError || !workspace) throw new Error('Workspace not found')
 
-  return { user: auth.user, group, workspace, member }
+  return { db, user, group, workspace, member }
 }
 
-async function loadOverview(groupId: string, ideaId: string, workspaceId: string, userId: string) {
+async function loadOverview(db: Awaited<ReturnType<typeof authenticatedSupabase>>['db'], groupId: string, ideaId: string, workspaceId: string, userId: string) {
   const [
     { data: idea },
     { data: members },
@@ -79,12 +75,12 @@ async function loadOverview(groupId: string, ideaId: string, workspaceId: string
     { data: activity },
     { data: userProfile },
   ] = await Promise.all([
-    supabase.from('ideas').select('id,title,description,problem_statement,goals').eq('id', ideaId).maybeSingle(),
-    supabase.from('idea_group_members').select('*, user:users(id,email,profile_type)').eq('group_id', groupId).order('created_at', { ascending: true }),
-    supabase.from('workspace_objectives').select('*').eq('workspace_id', workspaceId).order('created_at', { ascending: false }),
-    supabase.from('project_tasks').select('*').eq('workspace_id', workspaceId).order('created_at', { ascending: false }),
-    supabase.from('project_activities').select('*').eq('group_id', groupId).order('created_at', { ascending: false }).limit(20),
-    supabase.from('users').select('id,email,profile_type').eq('id', userId).maybeSingle(),
+    db.from('ideas').select('id,title,description,problem_statement,goals').eq('id', ideaId).maybeSingle(),
+    db.from('idea_group_members').select('*, user:users(id,email,profile_type)').eq('group_id', groupId).order('created_at', { ascending: true }),
+    db.from('workspace_objectives').select('*').eq('workspace_id', workspaceId).order('created_at', { ascending: false }),
+    db.from('project_tasks').select('*').eq('workspace_id', workspaceId).order('created_at', { ascending: false }),
+    db.from('project_activities').select('*').eq('group_id', groupId).order('created_at', { ascending: false }).limit(20),
+    db.from('users').select('id,email,profile_type').eq('id', userId).maybeSingle(),
   ])
 
   if (missingPhaseSchema(objectivesResult.error) || missingPhaseSchema(tasksResult.error)) {
@@ -103,8 +99,8 @@ async function loadOverview(groupId: string, ideaId: string, workspaceId: string
   }
 }
 
-async function logActivity(groupId: string, actorId: string, eventType: string, metadata: Record<string, unknown>) {
-  await supabase.from('project_activities').insert({ group_id: groupId, actor_id: actorId, event_type: eventType, metadata })
+async function logActivity(db: Awaited<ReturnType<typeof authenticatedSupabase>>['db'], groupId: string, actorId: string, eventType: string, metadata: Record<string, unknown>) {
+  await db.from('project_activities').insert({ group_id: groupId, actor_id: actorId, event_type: eventType, metadata })
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -115,7 +111,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const accessData = await access(req, id)
 
     if (req.method === 'GET') {
-      const overview = await loadOverview(accessData.group.id, accessData.group.idea_id, accessData.workspace.id, accessData.user.id)
+      const overview = await loadOverview(accessData.db, accessData.group.id, accessData.group.idea_id, accessData.workspace.id, accessData.user.id)
       return res.status(200).json({ project: accessData.group, workspace: accessData.workspace, member: accessData.member, ...overview })
     }
 
@@ -126,7 +122,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (action !== 'stage') return res.status(400).json({ error: 'Invalid action' })
       const stage = clean(req.body.stage).toLowerCase()
       if (!stages.includes(stage)) return res.status(400).json({ error: 'Invalid stage' })
-      const { data, error } = await supabase
+      const { data, error } = await accessData.db
         .from('project_workspaces')
         .update({ current_stage: stage, stage_updated_by: accessData.user.id, stage_updated_at: new Date().toISOString() })
         .eq('id', accessData.workspace.id)
@@ -134,7 +130,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         .single()
       if (missingPhaseSchema(error)) throw new Error('Phase 1 workspace tables are missing. Run sql/migrations/20260811_workspace_phase1_foundation.sql in Supabase, then reload the app.')
       if (error || !data) throw new Error(error?.message || 'Unable to update project stage')
-      await logActivity(accessData.group.id, accessData.user.id, 'project_stage_changed', { stage })
+      await logActivity(accessData.db, accessData.group.id, accessData.user.id, 'project_stage_changed', { stage })
       return res.status(200).json({ workspace: data })
     }
 
@@ -147,7 +143,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         const status = objectiveStatuses.includes(clean(req.body.status)) ? clean(req.body.status) : 'proposed'
         const priority = priorities.includes(clean(req.body.priority)) ? clean(req.body.priority) : 'medium'
         const stage = stages.includes(clean(req.body.stage)) ? clean(req.body.stage) : accessData.workspace.current_stage || 'define'
-        const { data, error } = await supabase
+        const { data, error } = await accessData.db
           .from('workspace_objectives')
           .insert({
             workspace_id: accessData.workspace.id,
@@ -163,7 +159,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           .single()
         if (missingPhaseSchema(error)) throw new Error('Phase 1 workspace tables are missing. Run sql/migrations/20260811_workspace_phase1_foundation.sql in Supabase, then reload the app.')
         if (error || !data) throw new Error(error?.message || 'Unable to create objective')
-        await logActivity(accessData.group.id, accessData.user.id, 'objective_created', { objective_id: data.id, title })
+        await logActivity(accessData.db, accessData.group.id, accessData.user.id, 'objective_created', { objective_id: data.id, title })
         return res.status(201).json({ objective: data })
       }
 
@@ -175,7 +171,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         const suggestedRole = roles.includes(clean(req.body.suggested_role)) ? clean(req.body.suggested_role) : 'any'
         const objectiveId = clean(req.body.objective_id) || null
         if (objectiveId) {
-          const { data: objective } = await supabase
+          const { data: objective } = await accessData.db
             .from('workspace_objectives')
             .select('id')
             .eq('id', objectiveId)
@@ -183,7 +179,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             .maybeSingle()
           if (!objective) return res.status(400).json({ error: 'Invalid objective' })
         }
-        const { data, error } = await supabase
+        const { data, error } = await accessData.db
           .from('project_tasks')
           .insert({
             group_id: accessData.group.id,
@@ -202,7 +198,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           .single()
         if (missingPhaseSchema(error)) throw new Error('Phase 1 workspace tables are missing. Run sql/migrations/20260811_workspace_phase1_foundation.sql in Supabase, then reload the app.')
         if (error || !data) throw new Error(error?.message || 'Unable to create task')
-        await logActivity(accessData.group.id, accessData.user.id, 'task_created', { task_id: data.id, title, suggested_role: suggestedRole })
+        await logActivity(accessData.db, accessData.group.id, accessData.user.id, 'task_created', { task_id: data.id, title, suggested_role: suggestedRole })
         return res.status(201).json({ task: data })
       }
 
