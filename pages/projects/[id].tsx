@@ -19,6 +19,7 @@ type Node = {
 }
 
 type WorkspaceTab = 'overview' | 'work' | 'discuss' | 'build'
+type BuildPane = 'files' | 'editor' | 'ai'
 type WorkFilter = 'objectives' | 'tasks'
 type NewWorkItem = 'objective' | 'task'
 type Objective = {
@@ -185,6 +186,7 @@ export default function ProjectWorkspace() {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [aiPanelOpen, setAiPanelOpen] = useState(true)
+  const [mobileBuildPane, setMobileBuildPane] = useState<BuildPane>('editor')
   const [aiBusy, setAiBusy] = useState(false)
   const [aiError, setAiError] = useState('')
   const [aiRuns, setAiRuns] = useState<AiRun[]>([])
@@ -228,6 +230,21 @@ export default function ProjectWorkspace() {
   const open = useMemo(() => nodes.find((node) => node.id === openId) || null, [nodes, openId])
   const folders = useMemo(() => nodes.filter((node) => node.node_type === 'folder'), [nodes])
   const roomWorkspaceId = rooms[0]?.workspace_id || overview?.workspace.id || null
+  const pathForNode = useCallback(
+    (node: Node | null): string => {
+      if (!node) return ''
+      const segments = [node.name]
+      let parentId = node.parent_id
+      while (parentId) {
+        const parent = nodes.find((item) => item.id === parentId)
+        if (!parent) break
+        segments.unshift(parent.name)
+        parentId = parent.parent_id
+      }
+      return segments.join('/')
+    },
+    [nodes]
+  )
 
   useEffect(() => {
     activeFileRef.current = openId
@@ -493,6 +510,7 @@ export default function ProjectWorkspace() {
     if (node.node_type !== 'file') return
     setTabs((current) => (current.includes(node.id) ? current : [...current, node.id]))
     setOpenId(node.id)
+    setMobileBuildPane('editor')
     setError('')
   }, [])
 
@@ -517,8 +535,13 @@ export default function ProjectWorkspace() {
 
   const createNode = useCallback(
     async (nodeType: 'file' | 'folder') => {
-      const name = window.prompt(nodeType === 'file' ? 'File name' : 'Folder name')
+      const example = nodeType === 'file' ? 'README.md' : 'src'
+      const name = window.prompt(nodeType === 'file' ? 'File name (for example, README.md or index.ts)' : 'Folder name', example)?.trim()
       if (!name) return
+      if (nodeType === 'file' && !name.includes('.')) {
+        setError('Use a filename with an extension, such as README.md or index.ts.')
+        return
+      }
       setBusy(true)
       try {
         const parentId = chooseParent()
@@ -1065,23 +1088,30 @@ export default function ProjectWorkspace() {
     <section className="min-h-[calc(100vh-129px)] overflow-auto p-6">
       {workspaceError ? <div className="mb-4 rounded-xl border border-rose-900/80 bg-rose-950/60 p-3 text-sm text-rose-200">{workspaceError}</div> : null}
 
-      <div className={`${workspaceSurface} p-6`}>
-        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-teal-300">Project home</p>
-        <h1 className="mt-2 max-w-4xl text-3xl font-semibold text-white">{overview?.project.name || 'Project workspace'}</h1>
+      <div className="grid gap-5 xl:grid-cols-[1.15fr_0.85fr]">
+        <div className={`${workspaceSurface} p-5`}>
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-teal-300">Project summary</p>
+        <h1 className="mt-2 max-w-4xl text-2xl font-semibold text-white">{overview?.project.name || 'Project workspace'}</h1>
         <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">
-          {overview?.idea?.description || overview?.project.summary || "Let's start turning this idea into a project."}
+          {overview?.idea?.description || overview?.project.summary || 'Add an objective or task to begin organizing this project.'}
         </p>
         <div className="mt-4 flex flex-wrap gap-2">
           <span className={activePill}>{currentStage}</span>
           <span className={mutedPill}>{progress}% complete</span>
-          <span className={mutedPill}>{overview?.objectives.length || 0} active objectives</span>
-          <span className={mutedPill}>{openTasks.length} open tasks</span>
-          <span className={mutedPill}>{teamMembers.length} team members</span>
         </div>
         {currentStage === 'validate' ? <p className="mt-3 text-xs text-teal-200/80">Validate: define the problem, gather evidence, test assumptions, and get feedback.</p> : null}
 
+        </div>
+        <div className={`${workspaceSurface} p-5`}>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-teal-300">Next steps</p>
+          <div className="mt-4 grid gap-2 sm:grid-cols-2">
+            <button type="button" onClick={() => { setActiveWorkspaceTab('work'); setNewWorkItem('objective') }} className={primaryAction}>Create objective</button>
+            <button type="button" onClick={() => { setActiveWorkspaceTab('work'); setNewWorkItem('task') }} className={secondaryAction}>Create task</button>
+            <button type="button" onClick={() => setActiveWorkspaceTab('discuss')} className={secondaryAction}>Start discussion</button>
+            {canManageTeam ? <button type="button" onClick={() => setAddMembersOpen(true)} className={secondaryAction}>Invite member</button> : null}
+          </div>
         {!hasActiveWork ? (
-          <div className="mt-6 rounded-2xl border border-teal-400/25 bg-teal-400/10 p-5">
+          <div className="mt-4 rounded-xl border border-teal-400/25 bg-teal-400/10 p-4">
             <p className="text-lg font-semibold text-white">Let’s start turning this idea into a project.</p>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-300">
               Create the first objective, open a team discussion, or invite collaborators. No need to stare at empty dashboards.
@@ -1104,11 +1134,12 @@ export default function ProjectWorkspace() {
           </div>
         ) : null}
       </div>
+      </div>
 
       <div className="mt-5 grid gap-5 xl:grid-cols-[1.2fr_0.8fr]">
         <div className={`${workspaceSurface} p-5`}>
           <div className="flex items-center justify-between gap-3">
-            <p className="text-sm font-semibold text-white">Current Work</p>
+            <p className="text-sm font-semibold text-white">Current focus</p>
             <button
               type="button"
               onClick={() => {
@@ -1121,13 +1152,13 @@ export default function ProjectWorkspace() {
             </button>
           </div>
           <div className="mt-4 space-y-3">
-            {(overview?.objectives || []).slice(0, 4).map((objective) => (
+            {(overview?.objectives || []).filter((objective) => objective.status !== 'complete').slice(0, 3).map((objective) => (
               <ObjectiveCard key={objective.id} objective={objective} taskCount={objectiveTaskCount(objective.id)} compact />
             ))}
             {hasActiveWork && !overview?.objectives.length ? (
               openTasks.slice(0, 4).map((task) => <TaskRow key={task.id} task={task} />)
             ) : null}
-            {!hasActiveWork ? <p className="text-sm text-slate-400">No active work yet. Start with the first objective.</p> : null}
+            {!hasActiveWork ? <p className="text-sm text-slate-400">No active objective or task yet.</p> : null}
           </div>
         </div>
 
@@ -1193,7 +1224,7 @@ export default function ProjectWorkspace() {
 
       <div className="mt-5 grid gap-5 xl:grid-cols-2">
         <div className={`${workspaceSurface} p-5`}>
-          <p className="text-sm font-semibold text-white">Ways You Can Help</p>
+            <p className="text-sm font-semibold text-white">Important open tasks</p>
           <div className="mt-4 space-y-3">
             {recommendedTasks.length ? (
               recommendedTasks.map((task) => (
@@ -1217,7 +1248,7 @@ export default function ProjectWorkspace() {
 
         <div className={`${workspaceSurface} p-5`}>
           <div className="flex items-center justify-between gap-3">
-            <p className="text-sm font-semibold text-white">Recent</p>
+            <p className="text-sm font-semibold text-white">Recent activity</p>
             <button type="button" onClick={() => setActiveWorkspaceTab('discuss')} className="text-sm font-semibold text-teal-300 hover:text-teal-200">
               {totalUnread ? `${totalUnread} unread discussion${totalUnread === 1 ? '' : 's'}` : 'Open Discuss'}
             </button>
@@ -1505,12 +1536,12 @@ export default function ProjectWorkspace() {
                 <span>•</span>
                 <span className={mutedPill}>{progress}% complete</span>
                 <span>•</span>
-                <span>{teamMembers.length} member{teamMembers.length === 1 ? '' : 's'} · {presenceLabel}</span>
+                  <span>{teamMembers.length} member{teamMembers.length === 1 ? '' : 's'}</span>
               </div>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
-            <span>{connectionStatus === 'Offline' ? 'Offline' : 'Online'}</span>
+            <span className={connectionStatus === 'Offline' ? 'text-slate-500' : 'text-teal-300'}>{connectionStatus === 'Offline' ? 'Offline' : 'Connected'}</span>
             {totalUnread ? (
               <button type="button" onClick={() => setActiveWorkspaceTab('discuss')} className="font-semibold text-teal-300 hover:text-teal-200">
                 {totalUnread} unread
@@ -1543,8 +1574,9 @@ export default function ProjectWorkspace() {
 
       {activeWorkspaceTab === 'build' ? (
         <>
-      <div className={`grid min-h-[calc(100vh-129px)] grid-cols-1 gap-4 p-4 ${aiPanelOpen ? 'xl:grid-cols-[280px_minmax(0,1fr)_380px]' : 'xl:grid-cols-[280px_minmax(0,1fr)]'}`}>
-        <aside className={`${workspaceSurface} min-h-[280px] p-3`}>
+      <div className="px-4 pt-3 lg:hidden"><div className="grid grid-cols-3 rounded-xl border border-slate-800 bg-slate-950/70 p-1">{(['files', 'editor', 'ai'] as BuildPane[]).map((pane) => <button key={pane} type="button" onClick={() => setMobileBuildPane(pane)} className={`rounded-lg px-3 py-2 text-sm font-semibold capitalize ${mobileBuildPane === pane ? 'bg-teal-400 text-slate-950' : 'text-slate-400'}`}>{pane}</button>)}</div></div>
+      <div className={`grid min-h-[calc(100vh-129px)] grid-cols-1 gap-4 p-4 ${aiPanelOpen ? 'xl:grid-cols-[260px_minmax(0,1fr)_360px]' : 'xl:grid-cols-[260px_minmax(0,1fr)]'}`}>
+        <aside className={`${workspaceSurface} min-h-[280px] p-3 ${mobileBuildPane === 'files' ? 'block' : 'hidden lg:block'}`}>
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal-300">Files</p>
@@ -1563,7 +1595,7 @@ export default function ProjectWorkspace() {
           <div className="space-y-1">{renderTree(null)}</div>
         </aside>
 
-        <section className={`${workspaceSurface} flex min-w-0 flex-col overflow-hidden`}>
+        <section className={`${workspaceSurface} ${mobileBuildPane === 'editor' ? 'flex' : 'hidden lg:flex'} min-h-[calc(100vh-177px)] min-w-0 flex-col overflow-hidden`}>
           <div className="flex min-h-12 items-center gap-2 border-b border-slate-800/80 bg-slate-950/50 px-3">
             {tabs.length ? (
               tabs.map((tabId) => {
@@ -1602,9 +1634,12 @@ export default function ProjectWorkspace() {
           </div>
 
           {open ? (
+            <div className="min-h-0 flex-1">
+              <div className="flex items-center justify-between gap-3 border-b border-slate-800/80 px-4 py-2 text-xs text-slate-500"><span className="truncate text-slate-300">{pathForNode(open)}</span><span className="shrink-0">{connectionStatus === 'Saving' ? 'Saving…' : connectionStatus === 'Offline' ? 'Offline' : `${connectionStatus} • autosaves`}</span></div>
             <MonacoEditor
               key={open.id}
-              defaultValue=""
+              height="calc(100% - 37px)"
+              defaultValue={open.content || ''}
               language={languageFor(open.name)}
               theme="vs-dark"
               onMount={(editor, monaco) => void bindEditor(editor, monaco)}
@@ -1619,6 +1654,7 @@ export default function ProjectWorkspace() {
                 wordWrap: 'on',
               }}
             />
+            </div>
           ) : (
             <div className="grid min-h-[420px] flex-1 place-items-center text-center text-slate-500">
               <div>
@@ -1629,7 +1665,7 @@ export default function ProjectWorkspace() {
           )}
         </section>
         {aiPanelOpen ? (
-          <BuildWithAiPanel
+          <div className={`${mobileBuildPane === 'ai' ? 'block' : 'hidden'} lg:block`}><BuildWithAiPanel
             open={aiPanelOpen}
             busy={aiBusy}
             error={aiError}
@@ -1641,7 +1677,7 @@ export default function ProjectWorkspace() {
             onSubmit={submitAiPrompt}
             onAccept={acceptAiChangeSet}
             onReject={rejectAiChangeSet}
-          />
+          /></div>
         ) : null}
       </div>
 
