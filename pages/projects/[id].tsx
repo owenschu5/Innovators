@@ -17,6 +17,13 @@ type Node = {
   content?: string | null
   version: number
 }
+type WorkspaceRuntime = {
+  id: string
+  status: 'stopped' | 'creating' | 'syncing_files' | 'installing' | 'starting' | 'running' | 'failed'
+  preview_url: string | null
+  error_summary: string | null
+  log_tail: string | null
+}
 
 type WorkspaceTab = 'overview' | 'work' | 'discuss' | 'build'
 type BuildPane = 'files' | 'editor' | 'ai'
@@ -186,6 +193,10 @@ export default function ProjectWorkspace() {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [aiPanelOpen, setAiPanelOpen] = useState(true)
+  const [runtime, setRuntime] = useState<WorkspaceRuntime | null>(null)
+  const [runtimeBusy, setRuntimeBusy] = useState(false)
+  const [runtimeError, setRuntimeError] = useState('')
+  const [runtimeLogsOpen, setRuntimeLogsOpen] = useState(false)
   const [mobileBuildPane, setMobileBuildPane] = useState<BuildPane>('editor')
   const [aiBusy, setAiBusy] = useState(false)
   const [aiError, setAiError] = useState('')
@@ -291,6 +302,20 @@ export default function ProjectWorkspace() {
       })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.error || 'AI workspace operation failed')
+      return payload
+    },
+    [id]
+  )
+
+  const runtimeRequest = useCallback(
+    async (path = '', method = 'GET') => {
+      const { data } = await supabase.auth.getSession()
+      const response = await fetch(`/api/projects/${id}/runtime${path}`, {
+        method,
+        headers: data.session?.access_token ? { Authorization: `Bearer ${data.session.access_token}` } : {},
+      })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || 'Runtime operation failed')
       return payload
     },
     [id]
@@ -498,6 +523,37 @@ export default function ProjectWorkspace() {
   useEffect(() => {
     void loadAi()
   }, [loadAi])
+
+  const loadRuntime = useCallback(async () => {
+    if (!id) return
+    try {
+      const payload = await runtimeRequest()
+      setRuntime(payload.runtime || null)
+      setRuntimeError('')
+    } catch (err) {
+      setRuntimeError(err instanceof Error ? err.message : 'Unable to load runtime')
+    }
+  }, [id, runtimeRequest])
+
+  useEffect(() => { void loadRuntime() }, [loadRuntime])
+  useEffect(() => {
+    if (!runtime || !['creating', 'syncing_files', 'installing', 'starting', 'running'].includes(runtime.status)) return
+    const timer = window.setInterval(() => void loadRuntime(), 5000)
+    return () => window.clearInterval(timer)
+  }, [loadRuntime, runtime])
+
+  const startRuntime = useCallback(async () => {
+    setRuntimeBusy(true); setRuntimeError('')
+    try { const payload = await runtimeRequest('/start', 'POST'); setRuntime(payload.runtime) }
+    catch (err) { setRuntimeError(err instanceof Error ? err.message : 'Unable to start runtime') }
+    finally { setRuntimeBusy(false) }
+  }, [runtimeRequest])
+  const stopRuntime = useCallback(async () => {
+    setRuntimeBusy(true); setRuntimeError('')
+    try { const payload = await runtimeRequest('/stop', 'POST'); setRuntime(payload.runtime) }
+    catch (err) { setRuntimeError(err instanceof Error ? err.message : 'Unable to stop runtime') }
+    finally { setRuntimeBusy(false) }
+  }, [runtimeRequest])
 
   useEffect(() => cleanupCollaboration, [cleanupCollaboration])
 
@@ -1632,6 +1688,19 @@ export default function ProjectWorkspace() {
               <span className="px-2 text-sm text-slate-500">Open a file to start editing</span>
             )}
           </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 bg-slate-950/30 px-3 py-2">
+            <div className="flex items-center gap-2">
+              <button type="button" disabled={runtimeBusy || Boolean(runtime && ['creating', 'syncing_files', 'installing', 'starting', 'running'].includes(runtime.status))} onClick={() => void startRuntime()} className={`${primaryAction} px-3 py-1.5`}>{runtimeBusy ? 'Working…' : 'Run ▶'}</button>
+              <button type="button" disabled={runtimeBusy || !runtime || !['creating', 'syncing_files', 'installing', 'starting', 'running'].includes(runtime.status)} onClick={() => void stopRuntime()} className={`${secondaryAction} px-3 py-1.5`}>Stop ■</button>
+              <button type="button" disabled={runtime?.status !== 'running' || !runtime.preview_url} onClick={() => { if (runtime?.preview_url) window.open(runtime.preview_url, '_blank', 'noopener,noreferrer') }} className={`${secondaryAction} px-3 py-1.5`}>Preview ↗</button>
+              <button type="button" onClick={() => setRuntimeLogsOpen((current) => !current)} className="px-2 py-1 text-xs font-semibold text-slate-400 hover:text-slate-200">Runtime logs</button>
+            </div>
+            <span className={runtime?.status === 'running' ? activePill : mutedPill}>{runtime ? runtime.status.replace('_', ' ') : 'stopped'}</span>
+          </div>
+          {runtimeError ? <div className="mx-3 mt-2 rounded-lg border border-rose-900/80 bg-rose-950/60 p-2 text-xs text-rose-200">{runtimeError}</div> : null}
+          {runtime?.error_summary ? <div className="mx-3 mt-2 rounded-lg border border-rose-900/80 bg-rose-950/60 p-2 text-xs text-rose-200">{runtime.error_summary}</div> : null}
+          {runtimeLogsOpen ? <div className="mx-3 mt-2 max-h-40 overflow-auto rounded-lg border border-slate-800 bg-slate-950/80 p-3"><p className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Runtime logs</p><pre className="whitespace-pre-wrap text-xs leading-5 text-slate-300">{runtime?.log_tail || 'No runtime logs yet.'}</pre></div> : null}
 
           {open ? (
             <div className="min-h-0 flex-1">
