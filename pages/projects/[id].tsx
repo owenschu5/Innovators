@@ -192,6 +192,10 @@ export default function ProjectWorkspace() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [newNodeType, setNewNodeType] = useState<'file' | 'folder' | null>(null)
+  const [newNodeName, setNewNodeName] = useState('')
+  const [newNodeParentId, setNewNodeParentId] = useState('')
+  const [newNodeError, setNewNodeError] = useState('')
   const [aiPanelOpen, setAiPanelOpen] = useState(true)
   const [runtime, setRuntime] = useState<WorkspaceRuntime | null>(null)
   const [runtimeBusy, setRuntimeBusy] = useState(false)
@@ -237,6 +241,7 @@ export default function ProjectWorkspace() {
   const bindingRef = useRef<{ destroy: () => void } | null>(null)
   const docRef = useRef<any | null>(null)
   const activeFileRef = useRef<string | null>(null)
+  const createInFlightRef = useRef(false)
 
   const open = useMemo(() => nodes.find((node) => node.id === openId) || null, [nodes, openId])
   const folders = useMemo(() => nodes.filter((node) => node.node_type === 'folder'), [nodes])
@@ -581,37 +586,41 @@ export default function ProjectWorkspace() {
     [openId]
   )
 
-  const chooseParent = useCallback(() => {
-    if (!folders.length) return null
-    const names = folders.map((folder) => folder.name).join(', ')
-    const picked = window.prompt(`Folder name for parent, or leave blank for root. Folders: ${names}`)
-    if (!picked) return null
-    return folders.find((folder) => folder.name === picked)?.id || null
-  }, [folders])
+  const openCreateNode = useCallback((nodeType: 'file' | 'folder') => {
+    setNewNodeType(nodeType)
+    setNewNodeName(nodeType === 'file' ? 'README.md' : '')
+    setNewNodeParentId('')
+    setNewNodeError('')
+  }, [])
 
   const createNode = useCallback(
-    async (nodeType: 'file' | 'folder') => {
-      const example = nodeType === 'file' ? 'README.md' : 'src'
-      const name = window.prompt(nodeType === 'file' ? 'File name (for example, README.md or index.ts)' : 'Folder name', example)?.trim()
-      if (!name) return
-      if (nodeType === 'file' && !name.includes('.')) {
-        setError('Use a filename with an extension, such as README.md or index.ts.')
-        return
-      }
+    async (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault()
+      if (!newNodeType || createInFlightRef.current) return
+      const name = newNodeName.trim()
+      if (!name) { setNewNodeError('Enter a name.'); return }
+      if (/[\\/\0]/.test(name) || name.includes('..')) { setNewNodeError('Use a single filename or folder name without paths.'); return }
+      if (newNodeType === 'file' && !/^.+\.[^./\\]+$/.test(name)) { setNewNodeError('Use a filename with an extension, such as README.md or index.ts.'); return }
+      createInFlightRef.current = true
       setBusy(true)
+      setNewNodeError('')
       try {
-        const parentId = chooseParent()
-        const payload = await request('POST', { name, node_type: nodeType, parent_id: parentId })
+        const parentId = newNodeParentId || null
+        const payload = await request('POST', { name, node_type: newNodeType, parent_id: parentId })
         setNodes((current) => [...current, payload.node])
         if (parentId) setExpanded((current) => ({ ...current, [parentId]: true }))
-        if (nodeType === 'file') openFile(payload.node)
+        if (newNodeType === 'file') openFile(payload.node)
+        setNewNodeType(null)
+        setNewNodeName('')
+        setNewNodeParentId('')
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Create failed')
+        setNewNodeError(err instanceof Error ? err.message : 'Create failed')
       } finally {
+        createInFlightRef.current = false
         setBusy(false)
       }
     },
-    [chooseParent, openFile, request]
+    [newNodeName, newNodeParentId, newNodeType, openFile, request]
   )
 
   const rename = useCallback(
@@ -1640,10 +1649,10 @@ export default function ProjectWorkspace() {
             </div>
           </div>
           <div className="mb-3 flex gap-2">
-            <button type="button" disabled={busy} onClick={() => void createNode('file')} className={`${primaryAction} px-3 py-1.5`}>
+            <button type="button" disabled={busy} onClick={() => openCreateNode('file')} className={`${primaryAction} px-3 py-1.5`}>
               New File
             </button>
-            <button type="button" disabled={busy} onClick={() => void createNode('folder')} className={`${secondaryAction} px-3 py-1.5`}>
+            <button type="button" disabled={busy} onClick={() => openCreateNode('folder')} className={`${secondaryAction} px-3 py-1.5`}>
               New Folder
             </button>
           </div>
@@ -1766,6 +1775,29 @@ export default function ProjectWorkspace() {
         />
       ) : null}
         </>
+      ) : null}
+
+      {newNodeType ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/80 p-4 backdrop-blur">
+          <div className={`${workspaceSurface} w-full max-w-md p-5`}>
+            <div className="flex items-start justify-between gap-4">
+              <div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-teal-300">Files</p><h2 className="mt-1 text-xl font-semibold text-white">New {newNodeType === 'file' ? 'file' : 'folder'}</h2></div>
+              <button type="button" disabled={busy} onClick={() => setNewNodeType(null)} className={secondaryAction}>Close</button>
+            </div>
+            <form onSubmit={createNode} className="mt-5">
+              <label className="block text-sm font-medium text-slate-200" htmlFor="workspace-node-name">{newNodeType === 'file' ? 'Filename' : 'Folder name'}</label>
+              <input id="workspace-node-name" value={newNodeName} onChange={(event) => { setNewNodeName(event.target.value); setNewNodeError('') }} className={`${workspaceField} mt-2`} placeholder={newNodeType === 'file' ? 'index.html' : 'src'} autoFocus disabled={busy} />
+              {newNodeType === 'file' ? <p className="mt-2 text-xs text-slate-500">Use a real filename such as index.html, README.md, or app.js.</p> : null}
+              <label className="mt-4 block text-sm font-medium text-slate-200" htmlFor="workspace-node-parent">Location</label>
+              <select id="workspace-node-parent" value={newNodeParentId} onChange={(event) => setNewNodeParentId(event.target.value)} className={`${workspaceSelect} mt-2`} disabled={busy}>
+                <option value="">Project root</option>
+                {folders.map((folder) => <option key={folder.id} value={folder.id}>{pathForNode(folder)}</option>)}
+              </select>
+              {newNodeError ? <p role="alert" className="mt-3 rounded-lg border border-rose-900/80 bg-rose-950/60 p-2 text-sm text-rose-200">{newNodeError}</p> : null}
+              <div className="mt-5 flex justify-end gap-2"><button type="button" disabled={busy} onClick={() => setNewNodeType(null)} className={secondaryAction}>Cancel</button><button type="submit" disabled={busy} className={primaryAction}>{busy ? 'Creating…' : `Create ${newNodeType}`}</button></div>
+            </form>
+          </div>
+        </div>
       ) : null}
 
       {newWorkItem ? (

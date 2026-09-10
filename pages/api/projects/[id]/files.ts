@@ -32,7 +32,7 @@ function isMissingWorkspaceSchema(error: unknown) {
 
 function cleanName(value: unknown) {
   const name = String(value || '').trim()
-  if (!name || !/^[^\\/]+$/.test(name) || name.includes('..')) throw new Error('Invalid file or folder name')
+  if (!name || !/^[^\\/\0]+$/.test(name) || name.includes('..')) throw new Error('Invalid file or folder name')
   return name
 }
 
