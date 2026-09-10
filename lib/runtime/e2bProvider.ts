@@ -58,7 +58,8 @@ export async function createE2bRuntime(manifest: RuntimeManifest, project: Detec
       try {
         await onStatus?.('starting')
         const started = await sandbox.commands.run('npm run dev -- --host 0.0.0.0 --port 3000', { cwd: workspaceDirectory, background: true, timeoutMs: START_TIMEOUT_MS })
-        await waitForPort(sandbox)
+        const preDetachProbe = await waitForPort(sandbox)
+        await detachAndVerifyServer(started, preDetachProbe, () => waitForPort(sandbox))
         logs = `${logs}\n${commandOutput(started)}`.trim()
       } catch (error) { throw new RuntimeProviderError('start server', error) }
     } else {
@@ -83,6 +84,7 @@ export async function createE2bRuntime(manifest: RuntimeManifest, project: Detec
           console.error('[runtime:static] launch failed', staticLaunchDiagnostic({ indexExists, syntaxCheckPassed: true, started, probeStatus: probe.status }))
           throw new Error('Static preview server did not become available.')
         }
+        await detachAndVerifyServer(started, probe, () => waitForHttp(sandbox))
         logs = commandOutput(started)
       } catch (error) { throw new RuntimeProviderError('start server', error) }
     }
@@ -105,6 +107,7 @@ async function waitForPort(sandbox: any) {
   const probe = "node -e \"const n=require('net');let i=0;const check=()=>{const s=n.connect(3000,'127.0.0.1');s.on('connect',()=>{s.end();process.exit(0)});s.on('error',()=>{if(++i>=30)process.exit(1);setTimeout(check,1000)})};check()\""
   const result = await sandbox.commands.run(probe, { cwd: '/home/oai/share', timeoutMs: START_TIMEOUT_MS })
   if (result.exitCode !== 0) throw new Error('Server did not begin listening on port 3000.')
+  return { ready: true, status: 'TCP connected' }
 }
 
 async function waitForHttp(sandbox: any) {
@@ -145,4 +148,21 @@ function staticLaunchDiagnostic({ indexExists, syntaxCheckPassed, started, probe
     stderr: boundedOutput(source.stderr || source.result?.stderr),
     message: boundedOutput(source.message),
   }
+}
+
+async function detachAndVerifyServer(handle: any, preDetachProbe: { ready: boolean; status: string }, verify: () => Promise<{ ready: boolean; status: string }>) {
+  await handle.disconnect()
+  await new Promise((resolve) => setTimeout(resolve, 350))
+  const postDetachProbe = await verify()
+  if (!postDetachProbe.ready) {
+    console.error('[runtime:server] process disappeared after detach', {
+      pid: handle.pid,
+      exitCode: handle.exitCode,
+      stdout: boundedOutput(handle.stdout),
+      stderr: boundedOutput(handle.stderr),
+      postDetachProbe: postDetachProbe.status,
+    })
+    throw new Error('Preview server stopped after detaching from the runtime request.')
+  }
+  console.info('[runtime:server] detached', { pid: handle.pid, preDetachProbe: preDetachProbe.status, postDetachProbe: postDetachProbe.status })
 }
