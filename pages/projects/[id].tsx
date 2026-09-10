@@ -241,6 +241,7 @@ export default function ProjectWorkspace() {
   const bindingRef = useRef<{ destroy: () => void } | null>(null)
   const docRef = useRef<any | null>(null)
   const activeFileRef = useRef<string | null>(null)
+  const collaborationAttemptRef = useRef(0)
   const createInFlightRef = useRef(false)
 
   const open = useMemo(() => nodes.find((node) => node.id === openId) || null, [nodes, openId])
@@ -267,6 +268,7 @@ export default function ProjectWorkspace() {
   }, [openId])
 
   const cleanupCollaboration = useCallback(() => {
+    collaborationAttemptRef.current += 1
     bindingRef.current?.destroy()
     providerRef.current?.destroy()
     docRef.current?.destroy()
@@ -1007,8 +1009,19 @@ export default function ProjectWorkspace() {
       cleanupCollaboration()
 
       const fileId = open.id
+      const attempt = collaborationAttemptRef.current
       const model = editor.getModel()
       if (!model) return
+
+      let ydoc: any | null = null
+      let provider: { destroy: () => void; setAwarenessField: (field: string, value: unknown) => void; awareness: any } | null = null
+      let binding: { destroy: () => void } | null = null
+      const isCurrentAttempt = () => activeFileRef.current === fileId && collaborationAttemptRef.current === attempt
+      const destroyPending = () => {
+        binding?.destroy()
+        provider?.destroy()
+        ydoc?.destroy()
+      }
 
       try {
         const [{ HocuspocusProvider }, { MonacoYjsBinding }, Y] = await Promise.all([
@@ -1020,11 +1033,11 @@ export default function ProjectWorkspace() {
         const session = data.session
         if (!session?.access_token) throw new Error('Sign in to join the workspace')
         const token = session.access_token
-        if (activeFileRef.current !== fileId) return
+        if (!isCurrentAttempt()) return
 
-        const ydoc = new Y.Doc()
+        ydoc = new Y.Doc()
         const name = session.user.email || session.user.id
-        const provider = new HocuspocusProvider({
+        provider = new HocuspocusProvider({
           url: collabUrl,
           name: `workspace:${id}:file:${fileId}`,
           document: ydoc,
@@ -1049,13 +1062,26 @@ export default function ProjectWorkspace() {
         })
 
         provider.setAwarenessField('user', { name, color: colorFor(name) })
-        const binding = new MonacoYjsBinding(monaco, ydoc.getText('monaco'), model, new Set([editor]), provider.awareness)
+        if (!isCurrentAttempt()) {
+          destroyPending()
+          return
+        }
+
+        binding = new MonacoYjsBinding(monaco, ydoc.getText('monaco'), model, new Set([editor]), provider.awareness)
+        if (!isCurrentAttempt()) {
+          destroyPending()
+          return
+        }
+
         docRef.current = ydoc
         providerRef.current = provider
         bindingRef.current = binding
       } catch (err) {
-        setConnectionStatus('Offline')
-        setError(err instanceof Error ? err.message : 'Unable to connect collaboration server')
+        destroyPending()
+        if (isCurrentAttempt()) {
+          setConnectionStatus('Offline')
+          setError(err instanceof Error ? err.message : 'Unable to connect collaboration server')
+        }
       }
     },
     [cleanupCollaboration, id, open]
@@ -1717,7 +1743,7 @@ export default function ProjectWorkspace() {
             <MonacoEditor
               key={open.id}
               height="calc(100% - 37px)"
-              defaultValue={open.content || ''}
+              defaultValue=""
               language={languageFor(open.name)}
               theme="vs-dark"
               onMount={(editor, monaco) => void bindEditor(editor, monaco)}

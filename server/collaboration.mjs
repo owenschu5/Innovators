@@ -132,6 +132,8 @@ function getText(document) {
   return document.getText('monaco')
 }
 
+const pendingStores = new Map()
+
 async function storeFile({ document, documentName, lastContext }) {
   if (!lastContext?.file?.id || !canEdit(lastContext.member?.permissions)) return
 
@@ -169,6 +171,19 @@ async function storeFile({ document, documentName, lastContext }) {
   console.log(`[collab] stored ${documentName} v${nextVersion}`)
 }
 
+async function queueStore(payload) {
+  const key = payload.lastContext?.file?.id || payload.documentName
+  const previous = pendingStores.get(key) || Promise.resolve()
+  const next = previous.catch(() => undefined).then(() => storeFile(payload))
+  pendingStores.set(key, next)
+
+  try {
+    await next
+  } finally {
+    if (pendingStores.get(key) === next) pendingStores.delete(key)
+  }
+}
+
 const server = new Server({
   port,
   name: 'innovators-workspace-collaboration',
@@ -194,12 +209,15 @@ const server = new Server({
   async onLoadDocument({ document, context, documentName }) {
     const file = context.file || (await loadWorkspaceFile(parseDocumentName(documentName).projectGroupId, parseDocumentName(documentName).fileId))
     const text = getText(document)
-    if (!text.length && file.content) {
-      text.insert(0, file.content)
-    }
+    const metadata = document.getMap('innovators-workspace')
+    document.transact(() => {
+      if (metadata.get('databaseSnapshotApplied')) return
+      if (!text.length && file.content) text.insert(0, file.content)
+      metadata.set('databaseSnapshotApplied', true)
+    }, 'database-snapshot')
   },
   async onStoreDocument(payload) {
-    await storeFile(payload)
+    await queueStore(payload)
   },
 })
 

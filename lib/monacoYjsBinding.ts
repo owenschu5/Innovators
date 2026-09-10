@@ -3,8 +3,10 @@ import * as Y from 'yjs'
 type Disposable = { dispose: () => void }
 
 export class MonacoYjsBinding {
+  private static activeBindings = new WeakMap<object, MonacoYjsBinding>()
   private applyingRemote = false
   private applyingLocal = false
+  private destroyed = false
   private decorations = new Map<any, string[]>()
   private disposables: Disposable[] = []
   private awareness: any
@@ -16,6 +18,12 @@ export class MonacoYjsBinding {
     private editors: Set<any>,
     awareness: any = null
   ) {
+    // A Monaco model can only be driven by one Y.Text. Without this guard, a
+    // second binding treats the first binding's remote edits as local edits and
+    // sends them back to Yjs, which can amplify the document on every sync.
+    MonacoYjsBinding.activeBindings.get(this.monacoModel)?.destroy()
+    MonacoYjsBinding.activeBindings.set(this.monacoModel, this)
+
     this.awareness = awareness
     this.ytext.observe(this.handleYText)
 
@@ -136,6 +144,9 @@ export class MonacoYjsBinding {
   }
 
   destroy() {
+    if (this.destroyed) return
+    this.destroyed = true
+
     this.ytext.unobserve(this.handleYText)
     if (this.awareness) this.awareness.off('change', this.renderRemoteSelections)
     this.disposables.forEach((disposable) => disposable.dispose())
@@ -144,5 +155,8 @@ export class MonacoYjsBinding {
       if (currentDecorations.length) editor.deltaDecorations(currentDecorations, [])
     })
     this.decorations.clear()
+    if (MonacoYjsBinding.activeBindings.get(this.monacoModel) === this) {
+      MonacoYjsBinding.activeBindings.delete(this.monacoModel)
+    }
   }
 }
