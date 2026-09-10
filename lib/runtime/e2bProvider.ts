@@ -65,19 +65,22 @@ export async function createE2bRuntime(manifest: RuntimeManifest, project: Detec
       try {
         await onStatus?.('starting')
         const indexExists = await sandbox.files.exists(`${workspaceDirectory}/index.html`)
-        const started = await sandbox.commands.run(`node ${staticServerPath} ${workspaceDirectory}`, { cwd: workspaceDirectory, background: true, timeoutMs: START_TIMEOUT_MS })
+        const syntaxCheck = await checkStaticServerSyntax(sandbox)
+        if (!syntaxCheck.passed) {
+          console.error('[runtime:static] launch failed', { scriptExists: true, indexExists, syntaxCheckPassed: false, exitCode: syntaxCheck.exitCode, stdout: boundedOutput(syntaxCheck.stdout), stderr: boundedOutput(syntaxCheck.stderr) })
+          throw new Error('Static server script failed syntax check.')
+        }
+        let started: any
+        try {
+          started = await sandbox.commands.run(`node ${staticServerPath} ${workspaceDirectory}`, { cwd: workspaceDirectory, background: true, timeoutMs: START_TIMEOUT_MS })
+        } catch (error) {
+          console.error('[runtime:static] launch failed', staticLaunchDiagnostic({ indexExists, syntaxCheckPassed: true, error }))
+          throw error
+        }
         const probe = await waitForHttp(sandbox)
         const processRunning = started.exitCode === undefined
         if (!indexExists || !processRunning || !probe.ready) {
-          console.error('[runtime:static] server unavailable', {
-            workspaceDirectory,
-            indexExists,
-            command: `node ${staticServerPath} ${workspaceDirectory}`,
-            processRunning,
-            probeStatus: probe.status,
-            stdout: boundedOutput(started.stdout),
-            stderr: boundedOutput(started.stderr),
-          })
+          console.error('[runtime:static] launch failed', staticLaunchDiagnostic({ indexExists, syntaxCheckPassed: true, started, probeStatus: probe.status }))
           throw new Error('Static preview server did not become available.')
         }
         logs = commandOutput(started)
@@ -105,17 +108,41 @@ async function waitForPort(sandbox: any) {
 }
 
 async function waitForHttp(sandbox: any) {
-  const probe = "node -e \"require('http').get('http://127.0.0.1:3000/',res=>{res.resume();process.exit(res.statusCode===200?0:1)}).on('error',()=>process.exit(1))\""
+  const probe = "node -e \"const http=require('http');let done=false;const finish=value=>{if(done)return;done=true;console.log(value);setTimeout(()=>process.exit(0),10)};const req=http.get('http://127.0.0.1:3000/',res=>{res.resume();finish('status:'+res.statusCode)});req.on('error',()=>finish('error'));req.setTimeout(1500,()=>{req.destroy();finish('timeout')})\""
   let status = 'not ready'
   for (const delay of [250, 500, 1000, 1000, 1000, 1000, 1000, 1000, 1000]) {
     await new Promise((resolve) => setTimeout(resolve, delay))
     const result = await sandbox.commands.run(probe, { cwd: workspaceDirectory, timeoutMs: 3000 })
-    status = result.exitCode === 0 ? 'HTTP 200' : `probe exit ${result.exitCode ?? 'unknown'}`
-    if (result.exitCode === 0) return { ready: true, status }
+    status = boundedOutput(result.stdout).trim() || `probe exit ${result.exitCode ?? 'unknown'}`
+    if (status.includes('status:200')) return { ready: true, status: 'HTTP 200' }
   }
   return { ready: false, status }
 }
 
 function boundedOutput(value: unknown) {
   return String(value || '').replace(/(?:E2B_API_KEY|SUPABASE_SERVICE_ROLE_KEY|OPENAI_API_KEY|Authorization)\s*[=:]\s*\S+/gi, '[redacted]').slice(-2000)
+}
+
+async function checkStaticServerSyntax(sandbox: any) {
+  const command = `node --check ${staticServerPath}; code=$?; echo __innovators_exit:$code; exit 0`
+  const result = await sandbox.commands.run(command, { cwd: workspaceDirectory, timeoutMs: 5000 })
+  const match = String(result.stdout || '').match(/__innovators_exit:(\d+)/)
+  return { passed: match?.[1] === '0', exitCode: match?.[1] || 'unknown', stdout: result.stdout, stderr: result.stderr }
+}
+
+function staticLaunchDiagnostic({ indexExists, syntaxCheckPassed, started, probeStatus, error }: { indexExists: boolean; syntaxCheckPassed: boolean; started?: any; probeStatus?: string; error?: unknown }) {
+  const source: any = error || started || {}
+  return {
+    workspaceDirectory,
+    scriptExists: true,
+    indexExists,
+    syntaxCheckPassed,
+    command: `node ${staticServerPath} ${workspaceDirectory}`,
+    processRunning: started ? started.exitCode === undefined : false,
+    exitCode: source.exitCode ?? source.code,
+    probeStatus: probeStatus || 'not run',
+    stdout: boundedOutput(source.stdout || source.result?.stdout || source.output),
+    stderr: boundedOutput(source.stderr || source.result?.stderr),
+    message: boundedOutput(source.message),
+  }
 }
